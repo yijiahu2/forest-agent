@@ -3,6 +3,7 @@ run_name: dom194_stage1_light_finetune
 
 base_config: /home/xth/forest_agent_project/configs/exp_dom194.yaml
 
+# 前四层最终产物：优先接 local_refine merged 结果
 metrics_json: /home/xth/forest_agent_project/outputs/local_refine/local_refine_18_16_20260310_091103/merged_metrics.json
 details_csv: /home/xth/forest_agent_project/outputs/local_refine/local_refine_18_16_20260310_091103/merged_details.csv
 
@@ -18,6 +19,11 @@ area_ha_field: "MJ_hm2"
 dem_tif: /mnt/e/Learning_documents/DEM/dem194.tif
 slope_tif:
 aspect_tif:
+
+# 若有全图语义伪标签，可填写 pseudo_mask_tif
+pseudo_mask_tif:
+# 若有当前最佳实例 shp，可填写 pseudo_inst_shp，然后自动栅格化生成 masks_sem
+pseudo_inst_shp:
 
 output_dir: /home/xth/forest_agent_project/outputs/finetune/dom194
 
@@ -40,10 +46,15 @@ batch_size: 2
 num_workers: 4
 lr: 1.0e-4
 weight_decay: 1.0e-4
-freeze_backbone: true
 pos_weight: 2.0
 val_ratio: 0.2
 seed: 42
+train_patch_size: 256
 
+# 与前四层保持一致
 bsize: 256
+
+# 当前仓库 run_zstreeseg_experiment 还未真正透传 stage1_ckpt 到 stage1_script，
+# 所以默认不做 rerun，先完成第五层建集与训练
+enable_rerun_after_finetune: false
 finetuned_suffix: "_ft_v1"

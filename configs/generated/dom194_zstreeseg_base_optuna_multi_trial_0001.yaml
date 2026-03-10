@@ -19,9 +19,9 @@ closure_field: YBD
 area_ha_field: MJ_hm2
 stage1_script: stage1_segformer_sliding.py
 stage2_script: stage2_cellpose_sam_sliding_v2.py
-diam_list: 96,160,256
-tile: 1536
-overlap: 384
+diam_list: 128,192,320
+tile: 2048
+overlap: 512
 tile_overlap: 0.45
 bsize: 256
 augment: true

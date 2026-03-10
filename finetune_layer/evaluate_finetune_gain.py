@@ -3,17 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import pandas as pd
-
-from finetune_layer.io_utils import dump_csv, dump_json, load_csv
-
-
-COMPARE_COLS = [
-    "XBH",
-    "tree_count_error_ratio",
-    "mean_crown_width_error_ratio",
-    "closure_error_abs",
-]
+from finetune_layer.io_utils import dump_csv, dump_json, load_csv, load_yaml, normalize_details_df
 
 
 def main() -> None:
@@ -21,16 +11,28 @@ def main() -> None:
     parser.add_argument("--before_csv", required=True)
     parser.add_argument("--after_csv", required=True)
     parser.add_argument("--out_dir", required=True)
+    parser.add_argument("--config", required=True)
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    before = load_csv(args.before_csv)
-    after = load_csv(args.after_csv)
+    cfg = load_yaml(args.config)
 
-    keep_before = [c for c in before.columns if c in COMPARE_COLS or c in ["mean_slope", "relief_elev", "dominant_aspect_class"]]
-    keep_after = [c for c in after.columns if c in COMPARE_COLS]
+    before_raw = load_csv(args.before_csv)
+    after_raw = load_csv(args.after_csv)
+
+    before, _, missing_before = normalize_details_df(before_raw, cfg)
+    after, _, missing_after = normalize_details_df(after_raw, cfg)
+
+    if missing_before:
+        raise ValueError(f"before_csv 规范化后仍缺列: {missing_before}")
+    if missing_after:
+        raise ValueError(f"after_csv 规范化后仍缺列: {missing_after}")
+
+    keep_before = ["XBH", "tree_count_error_ratio", "mean_crown_width_error_ratio", "closure_error_abs",
+                   "mean_slope", "relief_elev", "dominant_aspect_class"]
+    keep_after = ["XBH", "tree_count_error_ratio", "mean_crown_width_error_ratio", "closure_error_abs"]
 
     before = before[keep_before].copy()
     after = after[keep_after].copy()

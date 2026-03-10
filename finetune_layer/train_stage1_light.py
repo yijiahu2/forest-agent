@@ -1,53 +1,18 @@
 from __future__ import annotations
 
 import argparse
-import json
 import random
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
+import rasterio
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, random_split
 
-from finetune_layer.io_utils import dump_json, load_yaml
-
-
-class DummySegDataset(Dataset):
-    """
-    第一版最小骨架：
-    先不依赖你完整的 stage1 训练器，保证流程可跑。
-    后续你可把这里换成真实的 TIFF 读取与 mask 监督。
-    """
-
-    def __init__(self, meta_dir: str):
-        self.files = sorted(Path(meta_dir).glob("*.json"))
-
-    def __len__(self) -> int:
-        return len(self.files)
-
-    def __getitem__(self, idx: int):
-        # 这里先生成占位数据，保证训练流程通
-        # 后续换成真实 image / mask 读取
-        x = torch.randn(3, 256, 256).float()
-        y = (torch.rand(1, 256, 256) > 0.6).float()
-        return x, y
-
-
-class TinyHeadOnlyModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.backbone = nn.Sequential(
-            nn.Conv2d(3, 32, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.ReLU(inplace=True),
-        )
-        self.head = nn.Conv2d(64, 1, 1)
-
-    def forward(self, x):
-        feat = self.backbone(x)
-        return self.head(feat)
+from finetune_layer.io_utils import dump_json, load_csv, load_yaml
 
 
 def set_seed(seed: int) -> None:
@@ -57,10 +22,83 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def freeze_backbone(model: nn.Module) -> None:
-    for name, p in model.named_parameters():
-        if "backbone" in name:
-            p.requires_grad = False
+class RoiMaskDataset(Dataset):
+    def __init__(self, manifest_csv: str, patch_size: int = 256):
+        df = load_csv(manifest_csv)
+        df = df[df["has_mask"] == True].copy()  # noqa
+        self.df = df.reset_index(drop=True)
+        self.patch_size = patch_size
+
+    def __len__(self) -> int:
+        return len(self.df)
+
+    def _read_image(self, path: str) -> torch.Tensor:
+        with rasterio.open(path) as src:
+            arr = src.read()
+        if arr.shape[0] >= 3:
+            arr = arr[:3]
+        elif arr.shape[0] == 1:
+            arr = np.repeat(arr, 3, axis=0)
+        else:
+            pad = 3 - arr.shape[0]
+            arr = np.concatenate([arr, np.repeat(arr[-1:], pad, axis=0)], axis=0)
+
+        arr = arr.astype(np.float32)
+        p2 = np.percentile(arr, 98) if np.isfinite(arr).any() else 1.0
+        if p2 <= 0:
+            p2 = 1.0
+        arr = np.clip(arr / p2, 0, 1)
+        x = torch.from_numpy(arr).float().unsqueeze(0)
+        x = F.interpolate(x, size=(self.patch_size, self.patch_size), mode="bilinear", align_corners=False)
+        return x.squeeze(0)
+
+    def _read_mask(self, path: str) -> torch.Tensor:
+        with rasterio.open(path) as src:
+            arr = src.read(1)
+        arr = (arr > 0).astype(np.float32)
+        y = torch.from_numpy(arr).float().unsqueeze(0).unsqueeze(0)
+        y = F.interpolate(y, size=(self.patch_size, self.patch_size), mode="nearest")
+        return y.squeeze(0)
+
+    def __getitem__(self, idx: int):
+        row = self.df.iloc[idx]
+        x = self._read_image(row["image_path"])
+        y = self._read_mask(row["mask_sem_path"])
+        return x, y
+
+
+class TinyUNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.enc1 = nn.Sequential(
+            nn.Conv2d(3, 32, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, 3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.pool = nn.MaxPool2d(2)
+        self.enc2 = nn.Sequential(
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 64, 3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+        self.dec = nn.Sequential(
+            nn.Conv2d(64 + 32, 32, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, 3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.head = nn.Conv2d(32, 1, 1)
+
+    def forward(self, x):
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool(e1))
+        u = self.up(e2)
+        z = torch.cat([u, e1], dim=1)
+        d = self.dec(z)
+        return self.head(d)
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device):
@@ -106,10 +144,26 @@ def main() -> None:
 
     set_seed(int(cfg.get("seed", 42)))
 
-    meta_dir = Path(cfg["output_dir"]) / "pseudo_dataset" / "meta"
-    ds = DummySegDataset(str(meta_dir))
-    if len(ds) == 0:
-        raise RuntimeError("pseudo_dataset/meta 下没有样本，无法训练。")
+    manifest_csv = Path(cfg["output_dir"]) / "pseudo_dataset" / "manifest.csv"
+    if not manifest_csv.exists():
+        raise FileNotFoundError(f"manifest.csv 不存在: {manifest_csv}")
+
+    raw_manifest = pd.read_csv(manifest_csv)
+    usable = raw_manifest[raw_manifest["has_mask"] == True].copy()  # noqa
+
+    if len(usable) == 0:
+        summary = {
+            "status": "skipped_no_masks",
+            "reason": "pseudo_dataset 中没有可用 mask_sem.tif，训练已跳过。",
+            "manifest_csv": str(manifest_csv),
+            "num_total_samples": int(len(raw_manifest)),
+            "num_usable_samples": 0,
+        }
+        dump_json(summary, out_dir / "train_summary.json")
+        print("[SKIP] no usable masks, training skipped.")
+        return
+
+    ds = RoiMaskDataset(str(manifest_csv), patch_size=int(cfg.get("train_patch_size", 256)))
 
     val_ratio = float(cfg.get("val_ratio", 0.2))
     val_len = max(1, int(len(ds) * val_ratio))
@@ -120,18 +174,11 @@ def main() -> None:
     val_loader = DataLoader(val_ds, batch_size=int(cfg["batch_size"]), shuffle=False, num_workers=int(cfg["num_workers"]))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = TinyHeadOnlyModel().to(device)
-
-    if bool(cfg.get("freeze_backbone", True)):
-        freeze_backbone(model)
+    model = TinyUNet().to(device)
 
     pos_weight = torch.tensor([float(cfg.get("pos_weight", 2.0))], device=device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=float(cfg["lr"]),
-        weight_decay=float(cfg["weight_decay"]),
-    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg["lr"]), weight_decay=float(cfg["weight_decay"]))
 
     best_val = float("inf")
     best_ckpt = out_dir / "best_stage1_light.pt"
@@ -148,14 +195,15 @@ def main() -> None:
             torch.save({"model": model.state_dict(), "config": cfg}, best_ckpt)
 
     summary = {
-        "train_mode": cfg.get("train_mode", "head_only"),
-        "num_samples": len(ds),
+        "status": "trained",
+        "num_total_samples": int(len(raw_manifest)),
+        "num_usable_samples": int(len(ds)),
         "train_len": train_len,
         "val_len": val_len,
         "best_val_loss": best_val,
         "best_ckpt": str(best_ckpt),
         "history": history,
-        "note": "当前为最小可运行骨架。后续可替换为真实 stage1 训练器与真实 TIFF 监督。",
+        "note": "这是第五层的轻量独立训练器；只有在 stage1 推理脚本支持加载外部 ckpt 后，才能真正回灌到全流程。",
     }
     dump_json(summary, out_dir / "train_summary.json")
     print(f"[OK] training done: {best_ckpt}")
