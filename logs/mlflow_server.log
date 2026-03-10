@@ -1,0 +1,140 @@
+nohup: ignoring input
+/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/requests/__init__.py:86: RequestsDependencyWarning: Unable to find acceptable character detection dependency (chardet or charset_normalizer).
+  warnings.warn(
+Registry store URI not provided. Using backend store URI.
+2026/03/07 09:54:49 INFO mlflow.store.db.utils: Creating initial MLflow database tables...
+2026/03/07 09:54:49 INFO mlflow.store.db.utils: Updating database tables
+2026/03/07 09:54:49 ERROR mlflow.cli: Error initializing backend store
+2026/03/07 09:54:49 ERROR mlflow.cli: (sqlite3.OperationalError) table secrets already exists
+[SQL: 
+CREATE TABLE secrets (
+	secret_id VARCHAR(36) NOT NULL, 
+	secret_name VARCHAR(255) NOT NULL, 
+	encrypted_value BLOB NOT NULL, 
+	wrapped_dek BLOB NOT NULL, 
+	kek_version INTEGER NOT NULL, 
+	masked_value VARCHAR(500) NOT NULL, 
+	provider VARCHAR(64), 
+	auth_config TEXT, 
+	description TEXT, 
+	created_by VARCHAR(255), 
+	created_at BIGINT NOT NULL, 
+	last_updated_by VARCHAR(255), 
+	last_updated_at BIGINT NOT NULL, 
+	CONSTRAINT secrets_pk PRIMARY KEY (secret_id)
+)
+
+]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+Traceback (most recent call last):
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/sqlalchemy/engine/default.py", line 952, in do_execute
+    cursor.execute(statement, parameters)
+sqlite3.OperationalError: table secrets already exists
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/mlflow/cli/__init__.py", line 648, in server
+    initialize_backend_stores(
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/mlflow/server/handlers.py", line 631, in initialize_backend_stores
+    tracking_store = _get_tracking_store(backend_store_uri, default_artifact_root)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/mlflow/server/handlers.py", line 563, in _get_tracking_store
+    _tracking_store = _tracking_store_registry.get_store(store_uri, artifact_root)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/mlflow/tracking/_tracking_service/registry.py", line 45, in get_store
+    return self._get_store_with_resolved_uri(resolved_store_uri, artifact_uri)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/mlflow/tracking/_tracking_service/registry.py", line 56, in _get_store_with_resolved_uri
+    return builder(store_uri=resolved_store_uri, artifact_uri=artifact_uri)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/mlflow/server/handlers.py", line 355, in _get_sqlalchemy_store
+    return store_cls(store_uri, artifact_uri)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/mlflow/store/tracking/sqlalchemy_store.py", line 299, in __init__
+    mlflow.store.db.utils._initialize_tables(self.engine)
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/mlflow/store/db/utils.py", line 121, in _initialize_tables
+    _upgrade_db(engine)
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/mlflow/store/db/utils.py", line 289, in _upgrade_db
+    command.upgrade(config, "heads")
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/alembic/command.py", line 483, in upgrade
+    script.run_env()
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/alembic/script/base.py", line 545, in run_env
+    util.load_python_file(self.dir, "env.py")
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/alembic/util/pyfiles.py", line 116, in load_python_file
+    module = load_module_py(module_id, path)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/alembic/util/pyfiles.py", line 136, in load_module_py
+    spec.loader.exec_module(module)  # type: ignore
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 940, in exec_module
+  File "<frozen importlib._bootstrap>", line 241, in _call_with_frames_removed
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/mlflow/store/db_migrations/env.py", line 78, in <module>
+    run_migrations_online()
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/mlflow/store/db_migrations/env.py", line 72, in run_migrations_online
+    context.run_migrations()
+  File "<string>", line 8, in run_migrations
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/alembic/runtime/environment.py", line 969, in run_migrations
+    self.get_context().run_migrations(**kw)
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/alembic/runtime/migration.py", line 626, in run_migrations
+    step.migration_fn(**kw)
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/mlflow/store/db_migrations/versions/1bd49d398cd23_add_secrets_tables.py", line 119, in upgrade
+    op.create_table(
+  File "<string>", line 8, in create_table
+  File "<string>", line 3, in create_table
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/alembic/operations/ops.py", line 1331, in create_table
+    return operations.invoke(op)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/alembic/operations/base.py", line 452, in invoke
+    return fn(self, operation)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/alembic/operations/toimpl.py", line 140, in create_table
+    operations.impl.create_table(table, **kw)
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/alembic/ddl/impl.py", line 442, in create_table
+    self._exec(schema.CreateTable(table, **kw))
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/alembic/ddl/impl.py", line 256, in _exec
+    return conn.execute(construct, params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 1419, in execute
+    return meth(
+           ^^^^^
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/sqlalchemy/sql/ddl.py", line 187, in _execute_on_connection
+    return connection._execute_ddl(
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 1530, in _execute_ddl
+    ret = self._execute_context(
+          ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 1846, in _execute_context
+    return self._exec_single_context(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 1986, in _exec_single_context
+    self._handle_dbapi_exception(
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 2363, in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+  File "/home/xth/anaconda3/envs/forest_agent/lib/python3.11/site-packages/sqlalchemy/engine/default.py", line 952, in do_execute
+    cursor.execute(statement, parameters)
+sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) table secrets already exists
+[SQL: 
+CREATE TABLE secrets (
+	secret_id VARCHAR(36) NOT NULL, 
+	secret_name VARCHAR(255) NOT NULL, 
+	encrypted_value BLOB NOT NULL, 
+	wrapped_dek BLOB NOT NULL, 
+	kek_version INTEGER NOT NULL, 
+	masked_value VARCHAR(500) NOT NULL, 
+	provider VARCHAR(64), 
+	auth_config TEXT, 
+	description TEXT, 
+	created_by VARCHAR(255), 
+	created_at BIGINT NOT NULL, 
+	last_updated_by VARCHAR(255), 
+	last_updated_at BIGINT NOT NULL, 
+	CONSTRAINT secrets_pk PRIMARY KEY (secret_id)
+)
+
+]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)

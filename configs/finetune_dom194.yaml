@@ -1,0 +1,49 @@
+experiment_name: forest_agent_finetune
+run_name: dom194_stage1_light_finetune
+
+base_config: /home/xth/forest_agent_project/configs/exp_dom194.yaml
+
+metrics_json: /home/xth/forest_agent_project/outputs/local_refine/local_refine_18_16_20260310_091103/merged_metrics.json
+details_csv: /home/xth/forest_agent_project/outputs/local_refine/local_refine_18_16_20260310_091103/merged_details.csv
+
+input_image: /mnt/e/Learning_documents/ThesisExperiment/dom194.TIF
+xiaoban_shp: /mnt/e/Learning_documents/output/shp/xiaoban29.shp
+
+xiaoban_id_field: "XBH"
+tree_count_field: "LMSL"
+crown_field: "PJGF"
+closure_field: "YBD"
+area_ha_field: "MJ_hm2"
+
+dem_tif: /mnt/e/Learning_documents/DEM/dem194.tif
+slope_tif:
+aspect_tif:
+
+output_dir: /home/xth/forest_agent_project/outputs/finetune/dom194
+
+pseudo_strategy: conservative
+max_pseudo_rois: 80
+roi_size: 1024
+roi_overlap: 128
+good_replay_ratio: 0.25
+terrain_aware_sampling: true
+
+max_tree_count_error_ratio: 0.25
+max_crown_error_ratio: 0.35
+max_closure_error_abs: 0.20
+max_mean_slope_for_easy: 28.0
+max_relief_for_easy: 35.0
+
+train_mode: head_only
+epochs: 5
+batch_size: 2
+num_workers: 4
+lr: 1.0e-4
+weight_decay: 1.0e-4
+freeze_backbone: true
+pos_weight: 2.0
+val_ratio: 0.2
+seed: 42
+
+bsize: 256
+finetuned_suffix: "_ft_v1"

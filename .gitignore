@@ -1,0 +1,5 @@
+outputs/
+*.tif
+*.db
+mlruns/
+__pycache__/
