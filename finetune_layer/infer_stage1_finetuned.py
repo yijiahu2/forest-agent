@@ -33,44 +33,35 @@ def main() -> None:
         print("[SKIP] ckpt not found.")
         return
 
-    # 默认不启用 rerun，除非你后面显式打开
     if not to_bool(cfg.get("enable_rerun_after_finetune", False), default=False):
-        summary["reason"] = "enable_rerun_after_finetune=false；当前仅执行第五层数据与训练，不回灌到 stage1 推理。"
+        summary["reason"] = "enable_rerun_after_finetune=false；本轮只产出权重与回灌配置。"
         dump_json(summary, out_dir / "integration_summary.json")
         print("[SKIP] rerun disabled by config.")
         return
 
-    stage1_script = base_cfg.get("stage1_script")
-    if not stage1_script:
-        summary["reason"] = "base_config 未提供 stage1_script。"
-        dump_json(summary, out_dir / "integration_summary.json")
-        print("[SKIP] missing stage1_script.")
-        return
-
-    # 这里只能写入新配置；是否真正生效取决于 scripts.run_zstreeseg_experiment.py
-    # 当前你的 runner 实际并不会把 stage1_ckpt 透传给 stage1_script，因此这里只做兼容保留。
     suffix = str(cfg.get("finetuned_suffix", "_ft_v1"))
-    new_run_name = str(base_cfg.get("run_name", "run")) + suffix
+    new_cfg = dict(base_cfg)
 
-    base_cfg["run_name"] = new_run_name
-    base_cfg["stage1_ckpt"] = args.ckpt
+    new_cfg["run_name"] = str(base_cfg.get("run_name", "run")) + suffix
+    new_cfg["stage1_ckpt"] = args.ckpt
 
-    # 预留一个显式字段，等你将来改 run_zstreeseg_experiment.py 时直接透传
-    extra_args = base_cfg.get("stage1_extra_args", [])
+    extra_args = new_cfg.get("stage1_extra_args", [])
     if not isinstance(extra_args, list):
         extra_args = []
     if "--ckpt" not in extra_args and "--checkpoint" not in extra_args:
         extra_args.extend(["--ckpt", args.ckpt])
-    base_cfg["stage1_extra_args"] = extra_args
+    new_cfg["stage1_extra_args"] = extra_args
+
+    ft_output_dir = Path(base_cfg["output_dir"]).resolve().parent / f"{Path(base_cfg['output_dir']).name}{suffix}"
+    new_cfg["output_dir"] = str(ft_output_dir)
+    new_cfg["metrics_json"] = str(ft_output_dir / "metrics.json")
+    new_cfg["details_csv"] = str(ft_output_dir / "details.csv")
 
     new_cfg_path = out_dir / "exp_finetuned.yaml"
-    dump_yaml(base_cfg, new_cfg_path)
+    dump_yaml(new_cfg, new_cfg_path)
 
     summary["can_rerun"] = True
-    summary["reason"] = (
-        "已生成 finetuned 配置；但只有当 scripts.run_zstreeseg_experiment.py "
-        "把 stage1_ckpt / stage1_extra_args 传给 stage1_script 时，微调权重才会真正生效。"
-    )
+    summary["reason"] = "已生成 finetuned exp 配置，runner 现在会透传 stage1_ckpt / stage1_extra_args。"
     summary["exp_finetuned_yaml"] = str(new_cfg_path)
     dump_json(summary, out_dir / "integration_summary.json")
 

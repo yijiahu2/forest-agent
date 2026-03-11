@@ -44,23 +44,22 @@ def _get_raster_bounds_polygon(src: rasterio.io.DatasetReader):
     return box(left, bottom, right, top)
 
 
-def _ensure_geom_crs_matches_raster(
-    geom,
-    geom_crs,
-    raster_crs,
-):
-    """
-    将单个 geometry 从 geom_crs 转到 raster_crs。
-    """
+def _ensure_geom_crs_matches_raster(geom, geom_crs, raster_crs):
     if geom is None or geom.is_empty:
         return geom
-
     if geom_crs is None or raster_crs is None or str(geom_crs) == str(raster_crs):
         return geom
-
-    gseries = gpd.GeoSeries([geom], crs=geom_crs)
-    gseries = gseries.to_crs(raster_crs)
+    gseries = gpd.GeoSeries([geom], crs=geom_crs).to_crs(raster_crs)
     return gseries.iloc[0]
+
+
+def _get_input_image_bounds_in_shp_crs(input_image: str, shp_crs):
+    with rasterio.open(input_image) as src:
+        raster_poly = _get_raster_bounds_polygon(src)
+        raster_crs = src.crs
+    if shp_crs is None or raster_crs is None or str(shp_crs) == str(raster_crs):
+        return raster_poly
+    return gpd.GeoSeries([raster_poly], crs=raster_crs).to_crs(shp_crs).iloc[0]
 
 
 def _crop_raster_with_geom(
@@ -69,15 +68,10 @@ def _crop_raster_with_geom(
     geom_crs,
     out_path: Path | None = None,
     force_singleband_uint8: bool = False,
-) -> tuple[bool, dict | None, np.ndarray | None, str | None]:
-    """
-    返回:
-      success, out_meta, out_img, fail_reason
-    """
+):
     try:
         with rasterio.open(src_path) as src:
             geom2 = _ensure_geom_crs_matches_raster(geom, geom_crs, src.crs)
-
             if geom2 is None or geom2.is_empty:
                 return False, None, None, "empty_geometry"
 
@@ -103,7 +97,13 @@ def _crop_raster_with_geom(
                 arr = out_img[0]
                 arr = (arr > 0).astype("uint8")
                 out_img = arr[np.newaxis, ...]
-                out_meta.update({"count": 1, "dtype": "uint8"})
+                out_meta.update({
+                    "count": 1,
+                    "dtype": "uint8",
+                    "nodata": 0,
+                })
+                for bad_key in ["photometric", "compress", "interleave"]:
+                    out_meta.pop(bad_key, None)    
 
             if out_path is not None:
                 out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,17 +111,11 @@ def _crop_raster_with_geom(
                     dst.write(out_img)
 
             return True, out_meta, out_img, None
-
     except Exception as e:
         return False, None, None, f"exception:{type(e).__name__}:{e}"
 
 
-def _save_crop(
-    src_path: str,
-    geom,
-    geom_crs,
-    out_path: Path,
-) -> tuple[bool, dict | None, np.ndarray | None, str | None]:
+def _save_crop(src_path: str, geom, geom_crs, out_path: Path):
     return _crop_raster_with_geom(
         src_path=src_path,
         geom=geom,
@@ -131,12 +125,7 @@ def _save_crop(
     )
 
 
-def _save_crop_mask_from_raster(
-    src_path: str,
-    geom,
-    geom_crs,
-    out_path: Path,
-) -> tuple[bool, str | None]:
+def _save_crop_mask_from_raster(src_path: str, geom, geom_crs, out_path: Path):
     ok, _, _, reason = _crop_raster_with_geom(
         src_path=src_path,
         geom=geom,
@@ -154,10 +143,7 @@ def _save_mask_from_inst_shp(
     ref_meta: dict,
     ref_raster_crs,
     out_path: Path,
-) -> tuple[bool, str | None]:
-    """
-    将实例 shp 与当前 ROI 相交部分栅格化为单波段 uint8 mask。
-    """
+):
     if inst_gdf is None or len(inst_gdf) == 0:
         return False, "empty_instance_gdf"
 
@@ -165,7 +151,6 @@ def _save_mask_from_inst_shp(
     if geom2 is None or geom2.is_empty:
         return False, "empty_geometry"
 
-    # 转到参考栅格 CRS
     work = inst_gdf
     if work.crs is not None and ref_raster_crs is not None and str(work.crs) != str(ref_raster_crs):
         work = work.to_crs(ref_raster_crs)
@@ -192,13 +177,40 @@ def _save_mask_from_inst_shp(
     )
 
     meta = ref_meta.copy()
-    meta.update({"count": 1, "dtype": "uint8"})
+
+    # 关键修复：
+    # 参考影像可能继承了 nodata=256（例如原始 16-bit DOM），
+    # 但这里输出的是 uint8 mask，nodata 必须落在 0~255 范围内。
+    meta.update(
+        {
+            "count": 1,
+            "dtype": "uint8",
+            "nodata": 0,
+        }
+    )
+
+    # 某些参考影像 profile 里还可能带有不适合单波段 mask 的 photometric / compress 等字段，
+    # 这里尽量清理掉，避免后续再出现 profile 不兼容问题。
+    for bad_key in ["photometric", "compress", "interleave"]:
+        meta.pop(bad_key, None)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(out_path, "w", **meta) as dst:
         dst.write(arr, 1)
 
     return True, None
+
+
+def _filter_local_xiaoban(gdf: gpd.GeoDataFrame, xbh_field: str, input_image: str, out_dir: Path):
+    input_bounds_in_shp_crs = _get_input_image_bounds_in_shp_crs(input_image, gdf.crs)
+    local_gdf = gdf[gdf.intersects(input_bounds_in_shp_crs)].copy()
+
+    local_shp = out_dir / "local_xiaoban" / "xiaoban_local.shp"
+    local_shp.parent.mkdir(parents=True, exist_ok=True)
+    if len(local_gdf) > 0:
+        local_gdf.to_file(local_shp, encoding="utf-8")
+
+    return local_gdf, str(local_shp), input_bounds_in_shp_crs
 
 
 def main() -> None:
@@ -218,7 +230,6 @@ def main() -> None:
     aspect_tif = cfg.get("aspect_tif")
     shp = cfg["xiaoban_shp"]
     xbh_field = cfg["xiaoban_id_field"]
-
     pseudo_mask_tif = cfg.get("pseudo_mask_tif")
     pseudo_inst_shp = cfg.get("pseudo_inst_shp")
 
@@ -230,9 +241,17 @@ def main() -> None:
     if xbh_field not in gdf.columns:
         raise ValueError(f"小班 shp 中未找到字段: {xbh_field}")
 
-    # 统一修复几何
     gdf = gdf.copy()
     gdf["geometry"] = gdf.geometry.buffer(0)
+
+    local_gdf, local_shp, local_bounds_geom = _filter_local_xiaoban(
+        gdf=gdf,
+        xbh_field=xbh_field,
+        input_image=input_image,
+        out_dir=out_dir,
+    )
+
+    target_gdf = local_gdf if len(local_gdf) > 0 else gdf
 
     inst_gdf = None
     if pseudo_inst_shp:
@@ -243,52 +262,44 @@ def main() -> None:
     records = []
     skip_records = []
 
+    available_xbh = set(target_gdf[xbh_field].astype(str).tolist())
+
     for _, row in all_df.iterrows():
         xbh = str(row["XBH"])
         split = str(row["split"])
 
-        sub = gdf[gdf[xbh_field].astype(str) == xbh]
-        if len(sub) == 0:
+        if xbh not in available_xbh:
             skip_records.append(
                 {
                     "XBH": xbh,
                     "split": split,
-                    "reason": "xbh_not_found_in_shp",
+                    "reason": "xbh_outside_local_input_extent_or_not_found",
                 }
             )
             continue
 
+        sub = target_gdf[target_gdf[xbh_field].astype(str) == xbh]
+        if len(sub) == 0:
+            skip_records.append({"XBH": xbh, "split": split, "reason": "xbh_not_found_in_local_shp"})
+            continue
+
         geom = sub.iloc[0].geometry
-        geom_crs = gdf.crs
+        geom_crs = target_gdf.crs
         roi_id = f"{split}_{xbh}"
 
         if geom is None or geom.is_empty:
-            skip_records.append(
-                {
-                    "XBH": xbh,
-                    "split": split,
-                    "reason": "empty_geometry",
-                }
-            )
+            skip_records.append({"XBH": xbh, "split": split, "reason": "empty_geometry"})
             continue
 
         image_path = out_dir / "images" / f"{roi_id}.tif"
         img_ok, image_meta, _, img_reason = _save_crop(input_image, geom, geom_crs, image_path)
-
         if not img_ok or image_meta is None:
-            skip_records.append(
-                {
-                    "XBH": xbh,
-                    "split": split,
-                    "reason": f"image_crop_failed:{img_reason}",
-                }
-            )
+            skip_records.append({"XBH": xbh, "split": split, "reason": f"image_crop_failed:{img_reason}"})
             continue
 
         dem_path = None
         slope_path = None
         aspect_path = None
-
         dem_ok = False
         slope_ok = False
         aspect_ok = False
@@ -326,11 +337,9 @@ def main() -> None:
                 mask_sem_path,
             )
         elif inst_gdf is not None:
-            # 用输入影像的 crop 作为参考栅格
             with rasterio.open(image_path) as ref_src:
                 ref_meta = ref_src.meta.copy()
                 ref_raster_crs = ref_src.crs
-
             has_mask, mask_reason = _save_mask_from_inst_shp(
                 inst_gdf=inst_gdf,
                 geom=geom,
@@ -381,10 +390,13 @@ def main() -> None:
         dump_csv(skip_df, out_dir / "skipped_samples.csv")
 
     summary = {
+        "num_input_candidates": int(len(all_df)),
+        "num_local_xiaoban": int(len(local_gdf)),
         "num_samples": int(len(records)),
         "num_samples_with_mask": int(manifest["has_mask"].sum()) if len(manifest) else 0,
         "num_skipped": int(len(skip_records)),
         "output_dir": str(out_dir),
+        "local_xiaoban_shp": local_shp,
         "pseudo_mask_tif": pseudo_mask_tif,
         "pseudo_inst_shp": pseudo_inst_shp,
         "terrain_inputs": {
@@ -392,14 +404,11 @@ def main() -> None:
             "slope_tif": slope_tif,
             "aspect_tif": aspect_tif,
         },
-        "note": (
-            "本版本已支持：CRS 自动对齐、裁剪前 overlap 检查、"
-            "terrain 栅格不重叠时跳过而不中断整条第五层流程。"
-        ),
         "outputs": {
             "manifest_csv": str(out_dir / "manifest.csv"),
             "skipped_samples_csv": str(out_dir / "skipped_samples.csv") if len(skip_df) > 0 else None,
         },
+        "note": "已先做 local ROI 过滤，再对局部 xiaoban 建集；适配 shp 全区、DOM/DEM 局部块 的输入方式。",
     }
     dump_json(summary, out_dir / "pseudo_dataset_summary.json")
     print(f"[OK] pseudo dataset built: {out_dir}, n={len(records)}, skipped={len(skip_records)}")

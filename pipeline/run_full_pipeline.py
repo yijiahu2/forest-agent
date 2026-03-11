@@ -482,8 +482,8 @@ STAGE_ORDER = [
     "optuna_single",
     "optuna_multi",
     "local_refine",
+    "finetune",
 ]
-
 
 def init_pipeline_state(
     *,
@@ -511,6 +511,7 @@ def init_pipeline_state(
             "run_optuna_single": args.run_optuna_single,
             "run_optuna_multi": args.run_optuna_multi,
             "run_local_refine": args.run_local_refine,
+            "run_finetune": args.run_finetune,
         },
         "stages": {
             name: {
@@ -684,7 +685,13 @@ def sync_summary_from_state(summary: Dict[str, Any], state: Dict[str, Any]):
     local_refine = stage_outputs_or_none(state, "local_refine")
     if local_refine:
         add_local_refine_to_summary(summary, local_refine)
-
+    
+    finetune = stage_outputs_or_none(state, "finetune")
+    if finetune:
+        summary["stages"]["finetune"] = {
+            "finetune_summary_json": finetune.get("finetune_summary_json"),
+            "status": finetune.get("finetune_summary", {}).get("status"),
+        }
 
 def save_pipeline_summary(
     *,
@@ -710,6 +717,8 @@ def main():
     parser.add_argument("--run_optuna_single", action="store_true")
     parser.add_argument("--run_optuna_multi", action="store_true")
     parser.add_argument("--run_local_refine", action="store_true")
+    parser.add_argument("--run_finetune", action="store_true")
+    parser.add_argument("--finetune_config", default=None)
 
     parser.add_argument("--best_params_json", default=None)
     parser.add_argument("--agent_summary_json", default=None)
@@ -786,6 +795,7 @@ def main():
             "run_optuna_single": args.run_optuna_single,
             "run_optuna_multi": args.run_optuna_multi,
             "run_local_refine": args.run_local_refine,
+            "run_finetune": args.run_finetune,
         },
         "terrain_inputs": {
             "dem_tif": base_cfg.get("dem_tif"),
@@ -1066,6 +1076,88 @@ def main():
             prev = stage_outputs_or_none(state, "local_refine")
             if prev:
                 add_local_refine_to_summary(summary, prev)
+
+        # 6) finetune
+
+        def _run_finetune():
+            if not args.finetune_config:
+                raise ValueError("run_finetune requires --finetune_config")
+
+            # 读取原始 finetune 配置
+            finetune_cfg = load_yaml(args.finetune_config)
+
+            # 关键修复：把当前这次 pipeline 的真实 run_dir 注入 finetune 配置
+            finetune_cfg["pipeline_run_dir"] = str(pipeline_root)
+
+            # 为了不污染原配置文件，写一份 runtime finetune config 到当前 pipeline 目录
+            runtime_finetune_config = pipeline_root / "runtime_finetune_config.yaml"
+            save_yaml(finetune_cfg, runtime_finetune_config)
+
+            cmd = [
+                sys.executable,
+                "-m",
+                "pipeline.run_finetune_pipeline",
+                "--config",
+                str(runtime_finetune_config),
+            ]
+            res = run_subprocess(cmd, cwd="/home/xth/forest_agent_project")
+            if res["returncode"] != 0:
+                raise RuntimeError(f"finetune stage failed:\n{res['stderr']}")
+
+            finetune_out_dir = Path(finetune_cfg["output_dir"])
+            finetune_summary_json = finetune_out_dir / "finetune_pipeline_summary.json"
+
+            if not finetune_summary_json.exists():
+                raise FileNotFoundError(f"finetune summary not found: {finetune_summary_json}")
+
+            finetune_summary = load_json(finetune_summary_json)
+
+            return {
+                "runtime_finetune_config": str(runtime_finetune_config),
+                "finetune_summary_json": str(finetune_summary_json),
+                "finetune_summary": finetune_summary,
+            }
+
+        finetune_info = execute_stage(
+            state=state,
+            pipeline_root=pipeline_root,
+            stage_name="finetune",
+            enabled=args.run_finetune,
+            resume=args.resume,
+            force_rerun=args.force_rerun,
+            fn=_run_finetune,
+        )
+        if finetune_info:
+            summary["stages"]["finetune"] = {
+                "finetune_summary_json": finetune_info.get("finetune_summary_json"),
+                "status": finetune_info.get("finetune_summary", {}).get("status"),
+            }
+        else:
+            prev = stage_outputs_or_none(state, "finetune")
+            if prev:
+                summary["stages"]["finetune"] = {
+                    "finetune_summary_json": prev.get("finetune_summary_json"),
+                    "status": prev.get("finetune_summary", {}).get("status"),
+                }
+        
+        if args.stop_after == "finetune":
+            state["status"] = "stopped"
+            save_pipeline_state(pipeline_root, state)
+            sync_summary_from_state(summary, state)
+            summary["final_artifacts"] = {
+                "global_metrics_json": current_global_metrics_json,
+                "global_details_csv": current_global_details_csv,
+                "global_inst_shp": current_global_inst_shp,
+                "agent_summary_json": current_agent_summary_json,
+                "optuna_best_json": current_optuna_best_json,
+            }
+            finetune_prev = stage_outputs_or_none(state, "finetune")
+            if finetune_prev:
+                summary["final_artifacts"]["finetune_summary_json"] = finetune_prev.get("finetune_summary_json")
+            save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
+            return
+
+
 
         state["status"] = "success"
         save_pipeline_state(pipeline_root, state)

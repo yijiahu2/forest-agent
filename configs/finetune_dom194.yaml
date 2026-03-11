@@ -1,16 +1,17 @@
 experiment_name: forest_agent_finetune
-run_name: dom194_stage1_light_finetune
+run_name: dom194_stage1_tcd_external_finetune
 
 base_config: /home/xth/forest_agent_project/configs/exp_dom194.yaml
 
-# 前四层最终产物：优先接 local_refine merged 结果
-metrics_json: /home/xth/forest_agent_project/outputs/local_refine/local_refine_18_16_20260310_091103/merged_metrics.json
-details_csv: /home/xth/forest_agent_project/outputs/local_refine/local_refine_18_16_20260310_091103/merged_details.csv
+# 这几个字段会在 run_full_pipeline -> _run_finetune() 中自动写入 runtime config
+metrics_json:
+details_csv:
+pseudo_inst_shp:
 
 input_image: /mnt/e/Learning_documents/ThesisExperiment/dom194.TIF
 xiaoban_shp: /mnt/e/Learning_documents/output/shp/xiaoban29.shp
-
 xiaoban_id_field: "XBH"
+
 tree_count_field: "LMSL"
 crown_field: "PJGF"
 closure_field: "YBD"
@@ -20,41 +21,59 @@ dem_tif: /mnt/e/Learning_documents/DEM/dem194.tif
 slope_tif:
 aspect_tif:
 
-# 若有全图语义伪标签，可填写 pseudo_mask_tif
 pseudo_mask_tif:
-# 若有当前最佳实例 shp，可填写 pseudo_inst_shp，然后自动栅格化生成 masks_sem
-pseudo_inst_shp:
 
 output_dir: /home/xth/forest_agent_project/outputs/finetune/dom194
 
+# -----------------------------
+# 伪标签筛选 / 数据构建
+# -----------------------------
 pseudo_strategy: conservative
 max_pseudo_rois: 80
-roi_size: 1024
-roi_overlap: 128
 good_replay_ratio: 0.25
-terrain_aware_sampling: true
 
+terrain_aware_sampling: true
 max_tree_count_error_ratio: 0.25
 max_crown_error_ratio: 0.35
 max_closure_error_abs: 0.20
 max_mean_slope_for_easy: 28.0
 max_relief_for_easy: 35.0
 
-train_mode: head_only
+# -----------------------------
+# 训练超参数
+# -----------------------------
 epochs: 5
 batch_size: 2
 num_workers: 4
 lr: 1.0e-4
 weight_decay: 1.0e-4
-pos_weight: 2.0
-val_ratio: 0.2
 seed: 42
-train_patch_size: 256
-
-# 与前四层保持一致
 bsize: 256
 
-# 当前仓库 run_zstreeseg_experiment 还未真正透传 stage1_ckpt 到 stage1_script，
-# 所以默认不做 rerun，先完成第五层建集与训练
+# -----------------------------
+# External backend -> TCD / SegFormer
+# -----------------------------
+trainer_backend: external
+
+# 关键修复：
+# 你的本地 TCD/Hydra 版本不接受 model.config.learning_rate 直接 override，
+# 需要写成 +model.config.learning_rate=...
+
+train_command_template: >-
+  source /home/xth/anaconda3/etc/profile.d/conda.sh &&
+  conda activate tcd &&
+  export HF_HUB_OFFLINE=1 &&
+  export TRANSFORMERS_OFFLINE=1 &&
+  tcd-train semantic
+  model: /home/xth/tcd/models/tcd-segformer-mit-b5  # 这里指定正确的本地路径
+  data.root={dataset_dir}
+  data.output={output_dir}
+  +model.config.learning_rate={lr}
+  model.batch_size={batch_size}
+  data.tile_size=1024
+# 先不写死 ckpt，交给 external backend 在 output_dir 下自动搜索
+# expected_ckpt:
+
+# 在真正确认训练产物可被 stage1_segformer_sliding.py 直接加载前，先不自动 rerun
 enable_rerun_after_finetune: false
 finetuned_suffix: "_ft_v1"

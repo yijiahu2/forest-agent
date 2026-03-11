@@ -21,7 +21,7 @@ stage1_script: stage1_segformer_sliding.py
 stage2_script: stage2_cellpose_sam_sliding_v2.py
 diam_list: 128,256,320
 tile: 2048
-overlap: 512
+overlap: 384
 tile_overlap: 0.45
 bsize: 256
 augment: true

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shlex
 import subprocess
 import sys
@@ -18,10 +17,6 @@ import mlflow
 from agent.config_builder import load_yaml
 from geo_layer.terrain_features import generate_terrain_products
 
-
-# =========================
-# 基础工具
-# =========================
 
 def ensure_parent(path: str | Path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -39,7 +34,11 @@ def load_json(path: str | Path) -> Dict[str, Any]:
         return json.load(f)
 
 
-def run_cmd(cmd: List[str], cwd: Optional[str] = None, env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
+def run_cmd(
+    cmd: List[str],
+    cwd: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> subprocess.CompletedProcess:
     print("\n===== CMD =====")
     print(" ".join(shlex.quote(x) for x in cmd))
     res = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
@@ -77,16 +76,7 @@ def require_file(path: str | Path, desc: str):
         raise FileNotFoundError(f"{desc} not found: {path}")
 
 
-# =========================
-# terrain 准备
-# =========================
-
 def prepare_terrain_inputs_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    支持两种方式：
-    1) cfg 已提供 dem_tif + slope_tif + aspect_tif
-    2) 只提供 dem_tif，则自动生成 slope/aspect
-    """
     dem_tif = cfg.get("dem_tif")
     slope_tif = cfg.get("slope_tif")
     aspect_tif = cfg.get("aspect_tif")
@@ -104,7 +94,6 @@ def prepare_terrain_inputs_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if slope_tif and aspect_tif:
         return result
 
-    # 默认放到 metrics.json 同目录下的 terrain_cache
     metrics_json = cfg.get("metrics_json")
     if metrics_json:
         terrain_dir = Path(metrics_json).resolve().parent / "terrain_cache"
@@ -128,10 +117,6 @@ def prepare_terrain_inputs_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-# =========================
-# 路径与参数解析
-# =========================
-
 def get_stage_output_paths(cfg: Dict[str, Any]) -> Dict[str, str]:
     output_dir = Path(cfg["output_dir"])
     return {
@@ -152,11 +137,9 @@ def normalize_bool(v: Any) -> bool:
 
 
 def get_eval_output_paths(cfg: Dict[str, Any]) -> Dict[str, str]:
-    metrics_json = cfg["metrics_json"]
-    details_csv = cfg["details_csv"]
     return {
-        "metrics_json": metrics_json,
-        "details_csv": details_csv,
+        "metrics_json": cfg["metrics_json"],
+        "details_csv": cfg["details_csv"],
     }
 
 
@@ -186,15 +169,23 @@ def collect_run_metadata(cfg: Dict[str, Any], terrain_info: Dict[str, Any]) -> D
         "bsize",
         "augment",
         "iou_merge_thr",
+        "stage1_ckpt",
+        "stage1_extra_args",
     ]
     meta = {k: cfg.get(k) for k in keys if k in cfg}
     meta["terrain_info"] = terrain_info
     return meta
 
 
-# =========================
-# 阶段一 / 阶段二
-# =========================
+def _normalize_extra_args(extra_args: Any) -> list[str]:
+    if extra_args is None:
+        return []
+    if isinstance(extra_args, list):
+        return [str(x) for x in extra_args]
+    if isinstance(extra_args, str) and extra_args.strip():
+        return shlex.split(extra_args)
+    return []
+
 
 def run_stage1(cfg: Dict[str, Any]) -> Dict[str, Any]:
     paths = get_stage_output_paths(cfg)
@@ -212,6 +203,13 @@ def run_stage1(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "--out_dir",
         cfg["output_dir"],
     ]
+
+    # 关键修复：把 finetune 回灌参数真正传给 stage1
+    stage1_ckpt = cfg.get("stage1_ckpt")
+    if stage1_ckpt:
+        cmd.extend(["--ckpt", str(stage1_ckpt)])
+
+    cmd.extend(_normalize_extra_args(cfg.get("stage1_extra_args")))
 
     res = run_bash_in_conda_env(
         command=" ".join(shlex.quote(x) for x in cmd),
@@ -233,12 +231,9 @@ def run_stage1(cfg: Dict[str, Any]) -> Dict[str, Any]:
 def run_stage2(cfg: Dict[str, Any], m_sem_tif: str) -> Dict[str, Any]:
     paths = get_stage_output_paths(cfg)
 
-    script = cfg["stage2_script"]
-    work_dir = cfg["work_dir"]
-
     cmd = [
         "python",
-        script,
+        cfg["stage2_script"],
         "--in_tif",
         cfg["input_image"],
         "--msem_tif",
@@ -266,7 +261,7 @@ def run_stage2(cfg: Dict[str, Any], m_sem_tif: str) -> Dict[str, Any]:
         command=" ".join(shlex.quote(x) for x in cmd),
         conda_sh=cfg["conda_sh"],
         conda_env=cfg["conda_env"],
-        cwd=work_dir,
+        cwd=cfg["work_dir"],
     )
     if res.returncode != 0:
         raise RuntimeError(f"Stage2 failed:\n{res.stderr}")
@@ -279,10 +274,6 @@ def run_stage2(cfg: Dict[str, Any], m_sem_tif: str) -> Dict[str, Any]:
         "y_inst_color_png": paths["y_inst_color_png"],
     }
 
-
-# =========================
-# 评测（原生 terrain-aware）
-# =========================
 
 def run_evaluation(cfg: Dict[str, Any], inst_shp: str, terrain_info: Dict[str, Any]) -> Dict[str, Any]:
     eval_paths = get_eval_output_paths(cfg)
@@ -317,7 +308,6 @@ def run_evaluation(cfg: Dict[str, Any], inst_shp: str, terrain_info: Dict[str, A
 
     if cfg.get("density_field"):
         cmd.extend(["--density_field", cfg["density_field"]])
-
     if terrain_info.get("dem_tif"):
         cmd.extend(["--dem_tif", terrain_info["dem_tif"]])
     if terrain_info.get("slope_tif"):
@@ -344,10 +334,6 @@ def run_evaluation(cfg: Dict[str, Any], inst_shp: str, terrain_info: Dict[str, A
     }
 
 
-# =========================
-# MLflow
-# =========================
-
 def log_to_mlflow(
     cfg: Dict[str, Any],
     run_meta: Dict[str, Any],
@@ -361,7 +347,6 @@ def log_to_mlflow(
     mlflow.set_experiment(experiment_name)
 
     with mlflow.start_run(run_name=run_name):
-        # 参数
         for k, v in run_meta.items():
             if k == "terrain_info" and isinstance(v, dict):
                 for tk, tv in v.items():
@@ -369,13 +354,11 @@ def log_to_mlflow(
             else:
                 mlflow.log_param(k, v if v is not None else "")
 
-        # 指标
         metrics = eval_info["metrics"]
         for k, v in metrics.items():
             if isinstance(v, (int, float)):
                 mlflow.log_metric(k, float(v))
 
-        # 关键 artifact
         artifact_candidates = [
             stage1_info.get("m_sem_tif"),
             stage1_info.get("m_sem_png"),
@@ -386,7 +369,6 @@ def log_to_mlflow(
             eval_info.get("details_csv"),
         ]
 
-        # shp 相关 sidecar 也一并记录
         if stage2_info.get("y_inst_shp"):
             shp = Path(stage2_info["y_inst_shp"])
             for ext in [".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix"]:
@@ -402,14 +384,9 @@ def log_to_mlflow(
                     print(f"[warn] mlflow log_artifact failed for {p}: {e}")
 
 
-# =========================
-# 主流程
-# =========================
-
 def run_experiment(config_path: str) -> Dict[str, Any]:
     cfg = load_yaml(config_path)
 
-    # 基础检查
     required_keys = [
         "input_image",
         "output_dir",
@@ -438,7 +415,6 @@ def run_experiment(config_path: str) -> Dict[str, Any]:
         if k not in cfg:
             raise ValueError(f"Missing required config key: {k}")
 
-    # 关键运行约束
     if int(cfg["bsize"]) != 256:
         raise ValueError(f"Unsafe bsize={cfg['bsize']}. Must be fixed to 256.")
 
@@ -484,7 +460,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="Path to experiment YAML config.")
     args = parser.parse_args()
-
     run_experiment(args.config)
 
 

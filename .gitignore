@@ -3,3 +3,6 @@ outputs/
 *.db
 mlruns/
 __pycache__/
+data/
+models/
+
