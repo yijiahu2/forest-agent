@@ -1,0 +1,33 @@
+device: cuda
+task: semantic_segmentation
+num_workers: 16
+tta: true
+batch_size: 12
+checkpoint: null
+name: unet
+backbone: resnet34
+revision: main
+weights: restor/tcd-unet-r34
+in_channels: 3  
+num_classes: 2
+learning_rate: 1e-3
+loss: focal
+datamodule:
+augment: on
+pretrained: imagenet
+learning_rate_schedule_patience: 5
+resume: False
+
+trainer:
+  gpus: 1
+  min_epochs: 1
+  max_epochs: 75
+  auto_lr_find: False
+  auto_scale_batch_size: False
+  precision: 16
+  early_stopping_patience: 10
+  max_time: 00:48:00:00
+  debug_run: False
+
+wandb:
+  project_name: ???

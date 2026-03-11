@@ -1,0 +1,6 @@
+defaults:
+  - segformer
+
+weights: restor/tcd-segformer-mit-b4
+backbone: nvidia/mit-b4
+batch_size: 1

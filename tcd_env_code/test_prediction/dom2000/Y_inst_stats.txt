@@ -1,0 +1,8 @@
+instances=2526
+gsd_m=0.022701909
+pixel_area_m2=0.0005153767
+diam_list=160.0,256.0
+min_crown_diam_m=2.0
+max_crown_diam_m=10.0
+min_area_px=6095.7215
+max_area_px=152393.0371

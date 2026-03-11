@@ -1,0 +1,2 @@
+Tree count: 9
+Mean crown area: 97.77 m2

@@ -1,0 +1,13 @@
+defaults:
+  - data: default
+  - model: ???
+  - preprocess: default
+  - postprocess: default
+  - evaluate: default
+
+hydra:
+  run:
+    dir: .hydra
+
+input: ???
+output: ???

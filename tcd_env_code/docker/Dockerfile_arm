@@ -1,0 +1,41 @@
+FROM arm64v8/ubuntu:24.04
+ENV TZ=Europe/Zurich
+
+# set bash as current shell
+RUN chsh -s /bin/bash
+SHELL ["/bin/bash", "-c"]
+
+# Apt update and clean
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update
+RUN apt-get install -y wget python3 python3-venv python3-dev gdal-bin libgdal-dev g++ bzip2 build-essential ca-certificates libglib2.0-0 libxext6 libsm6 libxrender1 git mercurial subversion && \
+        apt-get clean
+
+# setup Restor user
+RUN groupadd -r restor && useradd -r -g restor restor
+RUN mkdir /home/restor
+RUN chown -R restor:restor /home/restor
+RUN chmod 755 /home/restor
+
+USER restor
+WORKDir /home/restor
+
+# setup conda virtual environment
+RUN python3 -m venv tcd_env
+RUN tcd_env/bin/python -m pip install --upgrade pip setuptools wheel
+ADD docker-tcd tcd
+
+USER root
+RUN chown -R restor:restor /home/restor/tcd
+USER restor
+
+# install
+WORKDIR tcd
+RUN ../tcd_env/bin/python -m pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cpu
+RUN ../tcd_env/bin/python -m pip install -r requirements.txt
+RUN ../tcd_env/bin/python -m pip install -e .[test]
+
+# run test suite
+RUN ../tcd_env/bin/python -m pytest -sx --verbose --trace
+
+RUN echo "source /home/restor/tcd_env/bin/activate" >> ~/.bashrc
