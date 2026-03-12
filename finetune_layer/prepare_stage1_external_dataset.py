@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -14,19 +13,58 @@ from pycocotools import mask as mask_utils
 from finetune_layer.io_utils import dump_json, load_csv, load_yaml
 
 
-def _safe_link_or_copy(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists():
-        return
-    try:
-        dst.symlink_to(src.resolve())
-    except Exception:
-        shutil.copy2(src, dst)
-
-
 def _read_image_shape(path: Path) -> tuple[int, int]:
     with rasterio.open(path) as src:
         return int(src.height), int(src.width)
+
+
+def _read_image_rgb_uint8(image_src: Path) -> np.ndarray:
+    with rasterio.open(image_src) as src:
+        arr = src.read()  # [C, H, W]
+
+    if arr.ndim != 3:
+        raise ValueError(f"Unexpected image array shape: {arr.shape}, file={image_src}")
+
+    if arr.shape[0] >= 3:
+        arr = arr[:3]
+    elif arr.shape[0] == 1:
+        arr = np.repeat(arr, 3, axis=0)
+    elif arr.shape[0] == 2:
+        arr = np.concatenate([arr, arr[:1]], axis=0)
+    else:
+        raise ValueError(f"Invalid band count: {arr.shape[0]}, file={image_src}")
+
+    arr = arr.astype(np.float32)
+
+    out = np.zeros_like(arr, dtype=np.uint8)
+    for i in range(3):
+        band = arr[i]
+        finite = np.isfinite(band)
+        if not finite.any():
+            continue
+
+        vals = band[finite]
+        lo = np.percentile(vals, 2)
+        hi = np.percentile(vals, 98)
+
+        if hi <= lo:
+            hi = vals.max()
+            lo = vals.min()
+
+        if hi <= lo:
+            out[i] = 0
+        else:
+            scaled = (band - lo) / (hi - lo)
+            scaled = np.clip(scaled, 0, 1)
+            out[i] = (scaled * 255).astype(np.uint8)
+
+    return np.transpose(out, (1, 2, 0))  # [H, W, C]
+
+
+def _save_image_png(image_src: Path, image_dst: Path) -> None:
+    image_dst.parent.mkdir(parents=True, exist_ok=True)
+    rgb = _read_image_rgb_uint8(image_src)
+    Image.fromarray(rgb, mode="RGB").save(image_dst)
 
 
 def _read_mask_binary(mask_src: Path) -> np.ndarray:
@@ -37,7 +75,7 @@ def _read_mask_binary(mask_src: Path) -> np.ndarray:
 
 def _save_mask_png(mask_bin: np.ndarray, mask_dst: Path) -> None:
     mask_dst.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(mask_bin, mode="L").save(mask_dst)
+    Image.fromarray((mask_bin * 255).astype(np.uint8), mode="L").save(mask_dst)
 
 
 def _binary_mask_to_coco_annotation(
@@ -49,13 +87,11 @@ def _binary_mask_to_coco_annotation(
     if mask_bin.max() == 0:
         return None
 
-    # COCO RLE 要求 Fortran order
     mask_fortran = np.asfortranarray(mask_bin.astype(np.uint8))
     rle = mask_utils.encode(mask_fortran)
     area = float(mask_utils.area(rle))
     bbox = mask_utils.toBbox(rle).tolist()
 
-    # json 序列化需要把 bytes 转成 str
     if isinstance(rle["counts"], bytes):
         rle["counts"] = rle["counts"].decode("utf-8")
 
@@ -165,10 +201,10 @@ def main() -> None:
         if not mask_src.exists():
             raise FileNotFoundError(f"mask_sem_path not found: {mask_src}")
 
-        image_dst = images_dir / f"{roi_id}{image_src.suffix.lower()}"
+        image_dst = images_dir / f"{roi_id}.png"
         mask_dst = masks_dir / f"{roi_id}.png"
 
-        _safe_link_or_copy(image_src, image_dst)
+        _save_image_png(image_src, image_dst)
 
         mask_bin = _read_mask_binary(mask_src)
         _save_mask_png(mask_bin, mask_dst)

@@ -186,7 +186,6 @@ def _normalize_extra_args(extra_args: Any) -> list[str]:
         return shlex.split(extra_args)
     return []
 
-
 def run_stage1(cfg: Dict[str, Any]) -> Dict[str, Any]:
     paths = get_stage_output_paths(cfg)
     ensure_parent(paths["m_sem_tif"])
@@ -204,12 +203,10 @@ def run_stage1(cfg: Dict[str, Any]) -> Dict[str, Any]:
         cfg["output_dir"],
     ]
 
-    # 关键修复：把 finetune 回灌参数真正传给 stage1
     stage1_ckpt = cfg.get("stage1_ckpt")
     if stage1_ckpt:
+        require_file(stage1_ckpt, "stage1_ckpt")
         cmd.extend(["--ckpt", str(stage1_ckpt)])
-
-    cmd.extend(_normalize_extra_args(cfg.get("stage1_extra_args")))
 
     res = run_bash_in_conda_env(
         command=" ".join(shlex.quote(x) for x in cmd),
@@ -226,7 +223,6 @@ def run_stage1(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "m_sem_tif": paths["m_sem_tif"],
         "m_sem_png": paths["m_sem_png"],
     }
-
 
 def run_stage2(cfg: Dict[str, Any], m_sem_tif: str) -> Dict[str, Any]:
     paths = get_stage_output_paths(cfg)
