@@ -1,0 +1,77 @@
+experiment_name: forest_agent_finetune
+run_name: dom194_stage1_tcd_external_finetune
+
+base_config: /home/xth/forest_agent_project/configs/exp_dom2000.yaml
+
+# 这些字段可由 run_full_pipeline / run_finetune_pipeline 在运行时补写
+
+metrics_json: /home/xth/forest_agent_project/outputs/local_refine/local_refine_16_18_20260312_155000/merged_metrics.json
+details_csv: /home/xth/forest_agent_project/outputs/local_refine/local_refine_16_18_20260312_155000/merged_details.csv
+pseudo_inst_shp: /home/xth/forest_agent_project/outputs/local_refine/local_refine_16_18_20260312_155000/merged_global_local_Y_inst.shp
+
+input_image: /mnt/e/Learning_documents/ThesisExperiment/dom2000.TIF
+xiaoban_shp: /mnt/e/Learning_documents/output/shp/xiaoban29.shp
+xiaoban_id_field: "XBH"
+
+tree_count_field: "LMSL"
+crown_field: "PJGF"
+closure_field: "YBD"
+area_ha_field: "MJ_hm2"
+
+dem_tif: /mnt/e/Learning_documents/DEM/dem2000.tif
+slope_tif:
+aspect_tif:
+
+pseudo_mask_tif:
+
+output_dir: /home/xth/forest_agent_project/outputs/finetune/dom2000
+
+pseudo_strategy: conservative
+max_pseudo_rois: 80
+good_replay_ratio: 0.25
+
+terrain_aware_sampling: true
+max_tree_count_error_ratio: 0.25
+max_crown_error_ratio: 0.35
+max_closure_error_abs: 0.20
+max_mean_slope_for_easy: 28.0
+max_relief_for_easy: 35.0
+
+epochs: 5
+batch_size: 2
+num_workers: 4
+lr: 1.0e-4
+weight_decay: 1.0e-4
+seed: 42
+bsize: 256
+
+trainer_backend: external
+
+# external 训练目录约定
+external_dataset_dirname: external_stage1_dataset
+external_train_out_dirname: training
+
+# 真实训练命令模板
+# 注意：
+# 1) 用 | 保留多行，不用 >-
+# 2) 每个 Hydra override 都单独用单引号包起来
+# 3) model= 用架构名；本地目录走 model.weights=
+# 4) learning_rate 先按 TCD 官方写法，不加 +
+train_command_template: |
+  source /home/xth/anaconda3/etc/profile.d/conda.sh
+  conda activate tcd
+  export HF_FORCE_LOCAL=1
+  export HF_HUB_OFFLINE=1
+  export TRANSFORMERS_OFFLINE=1
+  export HF_DATASETS_OFFLINE=1
+  tcd-train semantic \
+    'model=segformer-mit-b5' \
+    'model.weights=/home/xth/tcd/models/tcd-segformer-mit-b5' \
+    'data.root={dataset_dir}' \
+    'data.output={trainer_output_dir}' \
+    '+model.config.learning_rate={lr}' \
+    'model.batch_size={batch_size}' \
+    'data.tile_size=1024'
+
+enable_rerun_after_finetune: true
+finetuned_suffix: "_ft_v1"

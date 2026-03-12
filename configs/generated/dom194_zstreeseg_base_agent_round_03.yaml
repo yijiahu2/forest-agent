@@ -7,8 +7,8 @@ agent_version: v1
 conda_sh: /home/xth/anaconda3/etc/profile.d/conda.sh
 conda_env: tcd
 work_dir: /home/xth/tcd/test_prediction
-input_image: /mnt/e/Learning_documents/ThesisExperiment/dom194.TIF
-output_dir: /mnt/e/Learning_documents/output/dom194
+input_image: /mnt/e/Learning_documents/ThesisExperiment/dom2000.TIF
+output_dir: /mnt/e/Learning_documents/output/dom2000
 metrics_json: /home/xth/forest_agent_project/outputs/dom194_zstreeseg_base_agent_round_03/metrics.json
 details_csv: /home/xth/forest_agent_project/outputs/dom194_zstreeseg_base_agent_round_03/details.csv
 xiaoban_shp: /mnt/e/Learning_documents/output/shp/xiaoban29.shp
@@ -21,11 +21,11 @@ stage1_script: stage1_segformer_sliding.py
 stage2_script: stage2_cellpose_sam_sliding_v2.py
 diam_list: 128,256,320
 tile: 2048
-overlap: 384
-tile_overlap: 0.35
+overlap: 512
+tile_overlap: 0.45
 bsize: 256
 augment: true
 iou_merge_thr: 0.24
-dem_tif: /mnt/e/Learning_documents/DEM/dem194.tif
+dem_tif: /mnt/e/Learning_documents/DEM/dem2000.tif
 slope_tif: null
 aspect_tif: null
