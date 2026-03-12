@@ -1,6 +1,0 @@
-defaults:
-  - semantic_segmentation/unet_resnet34@_here_
-
-weights: restor/tcd-unetpp-r50
-name: unet++
-backbone: resnet50

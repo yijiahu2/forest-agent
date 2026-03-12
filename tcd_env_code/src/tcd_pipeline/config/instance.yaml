@@ -1,4 +1,0 @@
-defaults:
-  - config
-  - override model: mask-rcnn-r50
-  - override postprocess: cache_shapefile

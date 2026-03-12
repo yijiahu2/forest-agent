@@ -1,6 +1,0 @@
-defaults:
-  - unet
-
-weights: restor/tcd-unet-r50
-backbone: resnet50
-batch_size: 6

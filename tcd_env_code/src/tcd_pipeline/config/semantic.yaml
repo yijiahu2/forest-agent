@@ -1,4 +1,0 @@
-defaults:
-  - config
-  - override model: segformer-mit-b0
-  - override postprocess: cache_geotiff
