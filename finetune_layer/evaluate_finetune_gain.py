@@ -3,7 +3,36 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from finetune_layer.io_utils import dump_csv, dump_json, load_csv, load_yaml, normalize_details_df
+import pandas as pd
+
+from finetune_layer.io_utils import dump_json
+
+
+JOIN_COL = "xiaoban_id"
+
+BEFORE_KEEP = [
+    JOIN_COL,
+    "tree_count_error_abs",
+    "mean_crown_width_error_abs",
+    "closure_error_abs",
+    "density_error_abs",
+    "mean_slope",
+    "relief_elev",
+    "dominant_aspect_class",
+]
+
+AFTER_KEEP = [
+    JOIN_COL,
+    "tree_count_error_abs",
+    "mean_crown_width_error_abs",
+    "closure_error_abs",
+    "density_error_abs",
+]
+
+
+def _keep_existing(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    keep = [c for c in cols if c in df.columns]
+    return df[keep].copy()
 
 
 def main() -> None:
@@ -11,49 +40,94 @@ def main() -> None:
     parser.add_argument("--before_csv", required=True)
     parser.add_argument("--after_csv", required=True)
     parser.add_argument("--out_dir", required=True)
-    parser.add_argument("--config", required=True)
+    parser.add_argument("--config", required=False)
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg = load_yaml(args.config)
+    before = pd.read_csv(args.before_csv)
+    after = pd.read_csv(args.after_csv)
 
-    before_raw = load_csv(args.before_csv)
-    after_raw = load_csv(args.after_csv)
+    if JOIN_COL not in before.columns:
+        raise RuntimeError(
+            f"before_csv 缺少主键列 {JOIN_COL}，实际列为: {list(before.columns)}"
+        )
+    if JOIN_COL not in after.columns:
+        raise RuntimeError(
+            f"after_csv 缺少主键列 {JOIN_COL}，实际列为: {list(after.columns)}"
+        )
 
-    before, _, missing_before = normalize_details_df(before_raw, cfg)
-    after, _, missing_after = normalize_details_df(after_raw, cfg)
+    before = _keep_existing(before, BEFORE_KEEP)
+    after = _keep_existing(after, AFTER_KEEP)
 
-    if missing_before:
-        raise ValueError(f"before_csv 规范化后仍缺列: {missing_before}")
-    if missing_after:
-        raise ValueError(f"after_csv 规范化后仍缺列: {missing_after}")
+    merged = before.merge(after, on=JOIN_COL, suffixes=("_before", "_after"))
 
-    keep_before = ["XBH", "tree_count_error_ratio", "mean_crown_width_error_ratio", "closure_error_abs",
-                   "mean_slope", "relief_elev", "dominant_aspect_class"]
-    keep_after = ["XBH", "tree_count_error_ratio", "mean_crown_width_error_ratio", "closure_error_abs"]
+    if (
+        "tree_count_error_abs_before" in merged.columns
+        and "tree_count_error_abs_after" in merged.columns
+    ):
+        merged["gain_tree_count"] = (
+            merged["tree_count_error_abs_before"] - merged["tree_count_error_abs_after"]
+        )
 
-    before = before[keep_before].copy()
-    after = after[keep_after].copy()
+    if (
+        "mean_crown_width_error_abs_before" in merged.columns
+        and "mean_crown_width_error_abs_after" in merged.columns
+    ):
+        merged["gain_crown"] = (
+            merged["mean_crown_width_error_abs_before"]
+            - merged["mean_crown_width_error_abs_after"]
+        )
 
-    merged = before.merge(after, on="XBH", suffixes=("_before", "_after"))
+    if (
+        "closure_error_abs_before" in merged.columns
+        and "closure_error_abs_after" in merged.columns
+    ):
+        merged["gain_closure"] = (
+            merged["closure_error_abs_before"] - merged["closure_error_abs_after"]
+        )
 
-    merged["gain_tree_count"] = merged["tree_count_error_ratio_before"] - merged["tree_count_error_ratio_after"]
-    merged["gain_crown"] = merged["mean_crown_width_error_ratio_before"] - merged["mean_crown_width_error_ratio_after"]
-    merged["gain_closure"] = merged["closure_error_abs_before"] - merged["closure_error_abs_after"]
+    if (
+        "density_error_abs_before" in merged.columns
+        and "density_error_abs_after" in merged.columns
+    ):
+        merged["gain_density"] = (
+            merged["density_error_abs_before"] - merged["density_error_abs_after"]
+        )
 
-    dump_csv(merged, out_dir / "finetune_compare.csv")
+    compare_csv = out_dir / "finetune_compare.csv"
+    merged.to_csv(compare_csv, index=False)
 
     summary = {
         "num_compared": int(len(merged)),
-        "mean_gain_tree_count": float(merged["gain_tree_count"].mean()) if len(merged) else 0.0,
-        "mean_gain_crown": float(merged["gain_crown"].mean()) if len(merged) else 0.0,
-        "mean_gain_closure": float(merged["gain_closure"].mean()) if len(merged) else 0.0,
-        "num_tree_improved": int((merged["gain_tree_count"] > 0).sum()) if len(merged) else 0,
-        "num_crown_improved": int((merged["gain_crown"] > 0).sum()) if len(merged) else 0,
-        "num_closure_improved": int((merged["gain_closure"] > 0).sum()) if len(merged) else 0,
+        "join_col": JOIN_COL,
+        "mean_gain_tree_count": float(merged["gain_tree_count"].mean())
+        if "gain_tree_count" in merged.columns and len(merged) > 0
+        else None,
+        "mean_gain_crown": float(merged["gain_crown"].mean())
+        if "gain_crown" in merged.columns and len(merged) > 0
+        else None,
+        "mean_gain_closure": float(merged["gain_closure"].mean())
+        if "gain_closure" in merged.columns and len(merged) > 0
+        else None,
+        "mean_gain_density": float(merged["gain_density"].mean())
+        if "gain_density" in merged.columns and len(merged) > 0
+        else None,
+        "num_tree_improved": int((merged["gain_tree_count"] > 0).sum())
+        if "gain_tree_count" in merged.columns
+        else None,
+        "num_crown_improved": int((merged["gain_crown"] > 0).sum())
+        if "gain_crown" in merged.columns
+        else None,
+        "num_closure_improved": int((merged["gain_closure"] > 0).sum())
+        if "gain_closure" in merged.columns
+        else None,
+        "num_density_improved": int((merged["gain_density"] > 0).sum())
+        if "gain_density" in merged.columns
+        else None,
     }
+
     dump_json(summary, out_dir / "finetune_gain_summary.json")
     print(f"[OK] finetune compare done: {out_dir}")
 

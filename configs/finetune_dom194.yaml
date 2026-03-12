@@ -72,8 +72,6 @@ train_command_template: |
     '+model.config.learning_rate={lr}' \
     'model.batch_size={batch_size}' \
     'data.tile_size=1024'
-    'model.trainer.min_epochs={epochs}'
-    'model.trainer.max_epochs={epochs}'
 
 enable_rerun_after_finetune: true
 finetuned_suffix: "_ft_v1"

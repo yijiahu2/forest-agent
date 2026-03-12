@@ -186,6 +186,36 @@ def _normalize_extra_args(extra_args: Any) -> list[str]:
         return shlex.split(extra_args)
     return []
 
+
+def _normalize_stage1_extra_args(extra_args: Any) -> list[str]:
+    """
+    规范化 stage1_extra_args，并移除其中潜在重复的 ckpt 参数，
+    避免与 stage1_ckpt 字段重复注入。
+    """
+    args = _normalize_extra_args(extra_args)
+
+    cleaned: list[str] = []
+    skip_next = False
+
+    for item in args:
+        s = str(item).strip()
+
+        if skip_next:
+            skip_next = False
+            continue
+
+        if s in {"--ckpt", "--checkpoint"}:
+            skip_next = True
+            continue
+
+        if s.startswith("--ckpt=") or s.startswith("--checkpoint="):
+            continue
+
+        cleaned.append(s)
+
+    return cleaned
+
+
 def run_stage1(cfg: Dict[str, Any]) -> Dict[str, Any]:
     paths = get_stage_output_paths(cfg)
     ensure_parent(paths["m_sem_tif"])
@@ -208,6 +238,10 @@ def run_stage1(cfg: Dict[str, Any]) -> Dict[str, Any]:
         require_file(stage1_ckpt, "stage1_ckpt")
         cmd.extend(["--ckpt", str(stage1_ckpt)])
 
+    stage1_extra_args = _normalize_stage1_extra_args(cfg.get("stage1_extra_args"))
+    if stage1_extra_args:
+        cmd.extend(stage1_extra_args)
+
     res = run_bash_in_conda_env(
         command=" ".join(shlex.quote(x) for x in cmd),
         conda_sh=cfg["conda_sh"],
@@ -223,6 +257,7 @@ def run_stage1(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "m_sem_tif": paths["m_sem_tif"],
         "m_sem_png": paths["m_sem_png"],
     }
+
 
 def run_stage2(cfg: Dict[str, Any], m_sem_tif: str) -> Dict[str, Any]:
     paths = get_stage_output_paths(cfg)

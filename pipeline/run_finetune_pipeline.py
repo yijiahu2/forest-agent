@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +14,23 @@ def run_cmd(cmd: list[str], cwd: str | None = None) -> None:
     result = subprocess.run(cmd, cwd=cwd)
     if result.returncode != 0:
         raise RuntimeError(f"命令执行失败: {' '.join(cmd)}")
+
+
+def load_json_file(path: str | Path) -> dict:
+    path = Path(path)
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def to_bool(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    if isinstance(v, (int, float)):
+        return bool(v)
+    s = str(v).strip().lower()
+    return s in {"1", "true", "yes", "y", "on"}
 
 
 def main() -> None:
@@ -59,18 +77,22 @@ def main() -> None:
     if not train_summary_path.exists():
         raise RuntimeError(f"训练完成后未找到 train_summary.json: {train_summary_path}")
 
-    train_summary = load_yaml(str(train_summary_path)) if train_summary_path.suffix in [".yaml", ".yml"] else None
-    if train_summary is None:
-        import json
-        with open(train_summary_path, "r", encoding="utf-8") as f:
-            train_summary = json.load(f)
+    train_summary = load_json_file(train_summary_path)
 
     ckpt = train_summary.get("best_ckpt")
     if not ckpt:
         raise RuntimeError(f"train_summary.json 中未找到 best_ckpt: {train_summary_path}")
 
+    if not Path(ckpt).exists():
+        raise RuntimeError(f"best_ckpt 文件不存在: {ckpt}")
+
     summary["steps"].append(
-        {"step": "train_stage1_light", "backend": train_summary.get("backend"), "ckpt": ckpt}
+        {
+            "step": "train_stage1_light",
+            "backend": train_summary.get("backend"),
+            "ckpt": ckpt,
+            "train_summary_json": str(train_summary_path),
+        }
     )
 
     # 4. 生成 finetuned 配置
@@ -85,22 +107,64 @@ def main() -> None:
             ckpt,
         ]
     )
-    ft_cfg = str(out_dir / "finetuned_infer" / "exp_finetuned.yaml")
-    summary["steps"].append({"step": "make_finetuned_config", "config": ft_cfg})
 
-    enable_rerun = bool(cfg.get("enable_rerun_after_finetune", False))
+    ft_cfg = out_dir / "finetuned_infer" / "exp_finetuned.yaml"
+    if not ft_cfg.exists():
+        raise RuntimeError(f"未生成 exp_finetuned.yaml: {ft_cfg}")
+
+    integration_summary_path = out_dir / "finetuned_infer" / "integration_summary.json"
+    if integration_summary_path.exists():
+        integration_summary = load_json_file(integration_summary_path)
+        summary["steps"].append(
+            {
+                "step": "integration_check",
+                "integration_summary_json": str(integration_summary_path),
+                "can_rerun": integration_summary.get("can_rerun"),
+                "reason": integration_summary.get("reason"),
+            }
+        )
+    else:
+        integration_summary = None
+
+    summary["steps"].append({"step": "make_finetuned_config", "config": str(ft_cfg)})
+
+    enable_rerun = to_bool(cfg.get("enable_rerun_after_finetune", False))
     summary["enable_rerun_after_finetune"] = enable_rerun
 
     # 5. 如果开启，则用统一 runner 重跑
     if enable_rerun:
-        run_cmd([sys.executable, "-m", "scripts.run_zstreeseg_experiment", "--config", ft_cfg])
-        summary["steps"].append({"step": "rerun_experiment", "config": ft_cfg})
+        if integration_summary is not None and not integration_summary.get("can_rerun", False):
+            raise RuntimeError(
+                f"enable_rerun_after_finetune=true，但 integration_summary 显示不能 rerun: "
+                f"{integration_summary.get('reason', 'unknown reason')}"
+            )
+
+        run_cmd([sys.executable, "-m", "scripts.run_zstreeseg_experiment", "--config", str(ft_cfg)])
+        summary["steps"].append({"step": "rerun_experiment", "config": str(ft_cfg)})
 
         before_csv = cfg.get("details_csv")
-        after_cfg = load_yaml(ft_cfg)
-        after_csv = str(Path(after_cfg["output_dir"]) / "details.csv")
+        after_cfg = load_yaml(str(ft_cfg))
+
+        # 优先使用 finetuned config 中显式写入的 details_csv
+        after_csv = after_cfg.get("details_csv")
+        if not after_csv:
+            after_csv = str(Path(after_cfg["output_dir"]) / "details.csv")
+        else:
+            after_csv = str(after_csv)
+
+        if not Path(after_csv).exists():
+            raise RuntimeError(f"rerun 完成后未找到 after_csv: {after_csv}")
+
+        summary["steps"].append({"step": "rerun_output_check", "after_csv": after_csv})
 
         if before_csv:
+            before_csv = str(before_csv)
+            if not Path(before_csv).exists():
+                raise RuntimeError(f"before_csv 不存在: {before_csv}")
+
+            compare_dir = out_dir / "compare"
+            compare_dir.mkdir(parents=True, exist_ok=True)
+
             run_cmd(
                 [
                     sys.executable,
@@ -111,12 +175,37 @@ def main() -> None:
                     "--after_csv",
                     after_csv,
                     "--out_dir",
-                    str(out_dir / "compare"),
+                    str(compare_dir),
+                    "--config",
+                    args.config,
                 ]
             )
-            summary["steps"].append({"step": "compare", "compare_dir": str(out_dir / "compare")})
+            summary["steps"].append(
+                {
+                    "step": "compare",
+                    "compare_dir": str(compare_dir),
+                    "before_csv": before_csv,
+                    "after_csv": after_csv,
+                }
+            )
+        else:
+            print("[SKIP] details_csv 缺失，跳过 compare")
+            summary["steps"].append(
+                {
+                    "step": "compare",
+                    "status": "skipped",
+                    "reason": "details_csv missing in original finetune config",
+                }
+            )
     else:
         print("[SKIP] rerun after finetune is disabled by config")
+        summary["steps"].append(
+            {
+                "step": "rerun_experiment",
+                "status": "skipped",
+                "reason": "enable_rerun_after_finetune=false",
+            }
+        )
 
     dump_json(summary, out_dir / "finetune_pipeline_summary.json")
     print(f"[OK] finetune pipeline done: {out_dir}")
