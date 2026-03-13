@@ -1,30 +1,30 @@
 experiment_name: forest_agent_finetune
-run_name: dom194_stage1_tcd_external_finetune
+run_name: dom197_stage1_tcd_external_finetune
 
-base_config: /home/xth/forest_agent_project/configs/exp_dom2000.yaml
+base_config: /home/xth/forest_agent_project/configs/exp_dom197.yaml
 
 # 这些字段可由 run_full_pipeline / run_finetune_pipeline 在运行时补写
 
-metrics_json: /home/xth/forest_agent_project/outputs/local_refine/local_refine_16_18_20260312_155000/merged_metrics.json
-details_csv: /home/xth/forest_agent_project/outputs/local_refine/local_refine_16_18_20260312_155000/merged_details.csv
-pseudo_inst_shp: /home/xth/forest_agent_project/outputs/local_refine/local_refine_16_18_20260312_155000/merged_global_local_Y_inst.shp
+metrics_json: /home/xth/forest_agent_project/outputs/local_refine/local_refine_18_16_20260310_091103/merged_metrics.json
+details_csv: /home/xth/forest_agent_project/outputs/local_refine/local_refine_18_16_20260310_091103/merged_details.csv
+pseudo_inst_shp: /home/xth/forest_agent_project/outputs/local_refine/local_refine_18_16_20260310_091103/merged_global_local_Y_inst.shp
 
-input_image: /mnt/e/Learning_documents/ThesisExperiment/dom2000.TIF
-xiaoban_shp: /mnt/e/Learning_documents/output/shp/xiaoban29.shp
-
+input_image: /mnt/e/Learning_documents/DEM/dom197.tif
+xiaoban_shp: /mnt/e/Learning_documents/output/shp/xiaoban29pro.shp
 xiaoban_id_field: "XBH"
+
 tree_count_field: "LMSL"
 crown_field: "PJGF"
 closure_field: "YBD"
 area_ha_field: "MJ_hm2"
 
-dem_tif: /mnt/e/Learning_documents/DEM/dem2000.tif
+dem_tif: /mnt/e/Learning_documents/DEM/shanxia_DEM1m.tif
 slope_tif:
 aspect_tif:
 
 pseudo_mask_tif:
 
-output_dir: /home/xth/forest_agent_project/outputs/finetune/dom2000
+output_dir: /home/xth/forest_agent_project/outputs/finetune/dom197
 
 pseudo_strategy: conservative
 max_pseudo_rois: 80

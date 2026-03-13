@@ -21,7 +21,7 @@ from shapely.ops import unary_union
 
 from agent.config_builder import load_yaml, save_yaml
 from geo_layer.terrain_features import generate_terrain_products
-
+from geo_layer.spatial_context import enrich_xiaoban_clip_fields
 
 # =========================
 # 基础工具
@@ -217,7 +217,6 @@ def clip_vector_to_geometry(src_vector: str, geom_gdf: gpd.GeoDataFrame, out_vec
     geom = geom_gdf.to_crs(gdf.crs)
     clipped = gpd.overlay(gdf, geom, how="intersection")
     clipped = clipped[clipped.geometry.notnull() & (~clipped.geometry.is_empty)].copy()
-
     if clipped.empty:
         raise ValueError(f"Clipped vector is empty: {src_vector}")
 
@@ -225,6 +224,41 @@ def clip_vector_to_geometry(src_vector: str, geom_gdf: gpd.GeoDataFrame, out_vec
     ensure_parent(out_path)
     clipped.to_file(out_path)
 
+def clip_xiaoban_to_geometry_with_fields(
+    src_vector: str,
+    geom_gdf: gpd.GeoDataFrame,
+    out_vector: str,
+    xiaoban_id_field: str,
+    tree_count_field: Optional[str] = None,
+    crown_field: Optional[str] = None,
+    closure_field: Optional[str] = None,
+    area_ha_field: Optional[str] = None,
+    density_field: Optional[str] = None,
+):
+    gdf = gpd.read_file(src_vector)
+    if gdf.crs is None:
+        raise ValueError(f"Vector has no CRS: {src_vector}")
+
+    geom = geom_gdf.to_crs(gdf.crs)
+    clipped = gpd.overlay(gdf, geom, how="intersection")
+    clipped = clipped[clipped.geometry.notnull() & (~clipped.geometry.is_empty)].copy()
+    if clipped.empty:
+        raise ValueError(f"Clipped xiaoban is empty: {src_vector}")
+
+    clipped = enrich_xiaoban_clip_fields(
+        clipped_gdf=clipped,
+        source_gdf=gdf,
+        xiaoban_id_field=xiaoban_id_field,
+        tree_count_field=tree_count_field,
+        crown_field=crown_field,
+        closure_field=closure_field,
+        area_ha_field=area_ha_field,
+        density_field=density_field,
+    )
+
+    out_path = Path(out_vector)
+    ensure_parent(out_path)
+    clipped.to_file(out_path)
 
 def crop_roi_terrain_bundle(
     roi_geom_gdf: gpd.GeoDataFrame,
@@ -360,6 +394,9 @@ def build_local_refine_config(
     local_xiaoban_shp: str,
     params: Dict[str, Any],
     run_name: str,
+    local_dem_tif: str | None = None,
+    local_slope_tif: str | None = None,
+    local_aspect_tif: str | None = None,
 ) -> Dict[str, Any]:
     cfg = load_yaml(base_config_path)
 
@@ -368,9 +405,15 @@ def build_local_refine_config(
     cfg["output_dir"] = local_output_dir
     cfg["xiaoban_shp"] = local_xiaoban_shp
 
-    cfg["metrics_json"] = f"/home/xth/forest_agent_project/outputs/{run_name}/metrics.json"
-    cfg["details_csv"] = f"/home/xth/forest_agent_project/outputs/{run_name}/details.csv"
+    if local_dem_tif:
+        cfg["dem_tif"] = local_dem_tif
+    if local_slope_tif:
+        cfg["slope_tif"] = local_slope_tif
+    if local_aspect_tif:
+        cfg["aspect_tif"] = local_aspect_tif
 
+    cfg["metrics_json"] = str(Path(local_output_dir) / "metrics.json")
+    cfg["details_csv"] = str(Path(local_output_dir) / "details.csv")
     params = sanitize_params(params)
     for k, v in params.items():
         cfg[k] = v
@@ -928,7 +971,18 @@ def run_one_group_refinement(
     local_output_dir = str(group_root / "seg_output")
 
     crop_raster_to_geometry(base_cfg["input_image"], roi_gdf, local_image)
-    clip_vector_to_geometry(base_cfg["xiaoban_shp"], roi_gdf, local_xiaoban)
+
+    clip_xiaoban_to_geometry_with_fields(
+        src_vector=base_cfg["xiaoban_shp"],
+        geom_gdf=roi_gdf,
+        out_vector=local_xiaoban,
+        xiaoban_id_field=base_cfg["xiaoban_id_field"],
+        tree_count_field=base_cfg.get("tree_count_field"),
+        crown_field=base_cfg.get("crown_field"),
+        closure_field=base_cfg.get("closure_field"),
+        area_ha_field=base_cfg.get("area_ha_field"),
+        density_field=base_cfg.get("density_field"),
+    )
 
     terrain_roi_outputs = crop_roi_terrain_bundle(
         roi_geom_gdf=roi_gdf,
@@ -938,7 +992,7 @@ def run_one_group_refinement(
         aspect_tif=terrain_info.get("aspect_tif"),
     )
 
-    cfg = build_local_refine_config(
+    local_cfg = build_local_refine_config(
         base_config_path=base_config_path,
         out_config_path=local_config,
         local_input_image=local_image,
@@ -946,6 +1000,9 @@ def run_one_group_refinement(
         local_xiaoban_shp=local_xiaoban,
         params=params,
         run_name=group_name,
+        local_dem_tif=terrain_roi_outputs.get("roi_dem_tif"),
+        local_slope_tif=terrain_roi_outputs.get("roi_slope_tif"),
+        local_aspect_tif=terrain_roi_outputs.get("roi_aspect_tif"),
     )
 
     cmd = [
@@ -984,8 +1041,8 @@ def run_one_group_refinement(
         "xiaoban_ids": xiaoban_ids,
         "local_config": local_config,
         "local_output_dir": local_output_dir,
-        "local_metrics_json": cfg["metrics_json"],
-        "local_details_csv": cfg["details_csv"],
+        "local_metrics_json": local_cfg["metrics_json"],
+        "local_details_csv": local_cfg["details_csv"],
         "local_inst_shp": local_inst_shp,
         "merged_after_group_shp": merged_shp,
         "roi_image_tif": local_image,
@@ -998,7 +1055,6 @@ def run_one_group_refinement(
 
     save_json(group_summary, str(group_root / "group_summary.json"))
     return group_summary
-
 
 # =========================
 # 主流程

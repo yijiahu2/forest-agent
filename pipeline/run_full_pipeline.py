@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from agent.config_builder import load_yaml
 from agent.local_refine import run_local_refinement
+from geo_layer.spatial_context import prepare_spatial_context
 
 
 # =========================
@@ -194,7 +195,6 @@ def run_precheck(
     if cfg.get("conda_sh"):
         assert_file(cfg.get("conda_sh"), "conda_sh")
 
-    # optuna storage 仅做路径级预检查
     if args.run_optuna_single or args.run_optuna_multi:
         if args.optuna_storage and args.optuna_storage.startswith("sqlite:///"):
             db_path = args.optuna_storage.replace("sqlite:///", "/", 1)
@@ -211,6 +211,10 @@ def run_precheck(
             "dem_tif": cfg.get("dem_tif"),
             "slope_tif": cfg.get("slope_tif"),
             "aspect_tif": cfg.get("aspect_tif"),
+        },
+        "spatial_context": {
+            "enabled": bool(getattr(args, "auto_spatial_context", False)),
+            "summary_json": cfg.get("spatial_context_summary_json"),
         },
         "agent_env": {
             "ARK_API_KEY": bool(os.getenv("ARK_API_KEY", "").strip()) if args.run_agent else None,
@@ -239,9 +243,76 @@ def apply_cli_terrain_overrides_to_config(
         return base_config_path
 
     cfg = load_yaml(base_config_path)
-    cfg["dem_tif"] = dem_tif
-    cfg["slope_tif"] = slope_tif
-    cfg["aspect_tif"] = aspect_tif
+
+    if dem_tif is not None:
+        cfg["dem_tif"] = dem_tif
+    if slope_tif is not None:
+        cfg["slope_tif"] = slope_tif
+    if aspect_tif is not None:
+        cfg["aspect_tif"] = aspect_tif
+
+    temp_cfg = pipeline_root / "runtime_base_config.yaml"
+    save_yaml(cfg, temp_cfg)
+    return str(temp_cfg)
+
+
+def maybe_prepare_spatial_context_runtime_config(
+    runtime_base_config: str,
+    pipeline_root: Path,
+    enable_auto_spatial_context: bool,
+) -> str:
+    """
+    根据 input_image(DOM) 的范围，自动裁出同范围的：
+    - dem_tif
+    - slope_tif
+    - aspect_tif
+    - xiaoban_shp
+
+    然后把这些路径写回 runtime config，供后续五层流程继续使用。
+    """
+    if not enable_auto_spatial_context:
+        return runtime_base_config
+
+    cfg = load_yaml(runtime_base_config)
+
+    input_image = cfg.get("input_image")
+    dem_tif = cfg.get("dem_tif")
+    xiaoban_shp = cfg.get("xiaoban_shp")
+    xiaoban_id_field = cfg.get("xiaoban_id_field")
+
+    if not input_image:
+        raise ValueError("auto_spatial_context=True, but input_image is missing in config.")
+
+    if not dem_tif and not xiaoban_shp:
+        # 没有 DEM / xiaoban 可裁，直接返回
+        return runtime_base_config
+
+    context_dir = pipeline_root / "spatial_context"
+    ensure_dir(context_dir)
+
+    result = prepare_spatial_context(
+        dom_tif=input_image,
+        dem_tif=dem_tif,
+        xiaoban_shp=xiaoban_shp,
+        out_dir=context_dir,
+        xiaoban_id_field=xiaoban_id_field,
+        tree_count_field=cfg.get("tree_count_field"),
+        crown_field=cfg.get("crown_field"),
+        closure_field=cfg.get("closure_field"),
+        area_ha_field=cfg.get("area_ha_field"),
+        density_field=cfg.get("density_field"),
+    )
+
+    if result.get("dem_tif"):
+        cfg["dem_tif"] = result["dem_tif"]
+    if result.get("slope_tif"):
+        cfg["slope_tif"] = result["slope_tif"]
+    if result.get("aspect_tif"):
+        cfg["aspect_tif"] = result["aspect_tif"]
+    if result.get("xiaoban_shp"):
+        cfg["xiaoban_shp"] = result["xiaoban_shp"]
+
+    cfg["spatial_context_summary_json"] = result.get("summary_json")
 
     temp_cfg = pipeline_root / "runtime_base_config.yaml"
     save_yaml(cfg, temp_cfg)
@@ -258,13 +329,21 @@ def resolve_runtime_base_config(
     if args.resume and existing_runtime.exists():
         return str(existing_runtime)
 
-    return apply_cli_terrain_overrides_to_config(
+    runtime_base_config = apply_cli_terrain_overrides_to_config(
         base_config_path=args.base_config,
         dem_tif=args.dem_tif,
         slope_tif=args.slope_tif,
         aspect_tif=args.aspect_tif,
         pipeline_root=pipeline_root,
     )
+
+    runtime_base_config = maybe_prepare_spatial_context_runtime_config(
+        runtime_base_config=runtime_base_config,
+        pipeline_root=pipeline_root,
+        enable_auto_spatial_context=args.auto_spatial_context,
+    )
+
+    return runtime_base_config
 
 
 # =========================
@@ -485,6 +564,7 @@ STAGE_ORDER = [
     "finetune",
 ]
 
+
 def init_pipeline_state(
     *,
     pipeline_root: Path,
@@ -685,13 +765,14 @@ def sync_summary_from_state(summary: Dict[str, Any], state: Dict[str, Any]):
     local_refine = stage_outputs_or_none(state, "local_refine")
     if local_refine:
         add_local_refine_to_summary(summary, local_refine)
-    
+
     finetune = stage_outputs_or_none(state, "finetune")
     if finetune:
         summary["stages"]["finetune"] = {
             "finetune_summary_json": finetune.get("finetune_summary_json"),
             "status": finetune.get("finetune_summary", {}).get("status"),
         }
+
 
 def save_pipeline_summary(
     *,
@@ -737,6 +818,13 @@ def main():
     parser.add_argument("--slope_tif", default=None)
     parser.add_argument("--aspect_tif", default=None)
 
+    # spatial context
+    parser.add_argument(
+        "--auto_spatial_context",
+        action="store_true",
+        help="根据 input_image 的范围自动裁 DEM / 小班 shp，并生成局部 slope/aspect。",
+    )
+
     # pipeline control
     parser.add_argument("--resume", action="store_true", help="resume from existing pipeline_state.json")
     parser.add_argument("--run_dir", default=None, help="existing pipeline output dir for resume/reuse")
@@ -760,7 +848,6 @@ def main():
 
     args = parser.parse_args()
 
-    # resolve pipeline root
     if args.run_dir:
         pipeline_root = Path(args.run_dir)
         ensure_dir(pipeline_root)
@@ -801,6 +888,10 @@ def main():
             "dem_tif": base_cfg.get("dem_tif"),
             "slope_tif": base_cfg.get("slope_tif"),
             "aspect_tif": base_cfg.get("aspect_tif"),
+        },
+        "spatial_context": {
+            "enabled": args.auto_spatial_context,
+            "summary_json": base_cfg.get("spatial_context_summary_json"),
         },
         "control": {
             "resume": args.resume,
@@ -865,6 +956,7 @@ def main():
                 "global_inst_shp": current_global_inst_shp,
                 "agent_summary_json": current_agent_summary_json,
                 "optuna_best_json": current_optuna_best_json,
+                "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
             }
             save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
             return
@@ -904,6 +996,7 @@ def main():
                 "global_inst_shp": current_global_inst_shp,
                 "agent_summary_json": current_agent_summary_json,
                 "optuna_best_json": current_optuna_best_json,
+                "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
             }
             save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
             return
@@ -940,6 +1033,7 @@ def main():
                 "global_inst_shp": current_global_inst_shp,
                 "agent_summary_json": current_agent_summary_json,
                 "optuna_best_json": current_optuna_best_json,
+                "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
             }
             save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
             return
@@ -980,6 +1074,7 @@ def main():
                 "global_inst_shp": current_global_inst_shp,
                 "agent_summary_json": current_agent_summary_json,
                 "optuna_best_json": current_optuna_best_json,
+                "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
             }
             save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
             return
@@ -1020,6 +1115,7 @@ def main():
                 "global_inst_shp": current_global_inst_shp,
                 "agent_summary_json": current_agent_summary_json,
                 "optuna_best_json": current_optuna_best_json,
+                "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
             }
             save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
             return
@@ -1077,19 +1173,29 @@ def main():
             if prev:
                 add_local_refine_to_summary(summary, prev)
 
-        # 6) finetune
+        if args.stop_after == "local_refine":
+            state["status"] = "stopped"
+            save_pipeline_state(pipeline_root, state)
+            sync_summary_from_state(summary, state)
+            summary["final_artifacts"] = {
+                "global_metrics_json": current_global_metrics_json,
+                "global_details_csv": current_global_details_csv,
+                "global_inst_shp": current_global_inst_shp,
+                "agent_summary_json": current_agent_summary_json,
+                "optuna_best_json": current_optuna_best_json,
+                "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
+            }
+            save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
+            return
 
+        # 6) finetune
         def _run_finetune():
             if not args.finetune_config:
                 raise ValueError("run_finetune requires --finetune_config")
 
-            # 读取原始 finetune 配置
             finetune_cfg = load_yaml(args.finetune_config)
-
-            # 关键修复：把当前这次 pipeline 的真实 run_dir 注入 finetune 配置
             finetune_cfg["pipeline_run_dir"] = str(pipeline_root)
 
-            # 为了不污染原配置文件，写一份 runtime finetune config 到当前 pipeline 目录
             runtime_finetune_config = pipeline_root / "runtime_finetune_config.yaml"
             save_yaml(finetune_cfg, runtime_finetune_config)
 
@@ -1139,7 +1245,7 @@ def main():
                     "finetune_summary_json": prev.get("finetune_summary_json"),
                     "status": prev.get("finetune_summary", {}).get("status"),
                 }
-        
+
         if args.stop_after == "finetune":
             state["status"] = "stopped"
             save_pipeline_state(pipeline_root, state)
@@ -1150,14 +1256,13 @@ def main():
                 "global_inst_shp": current_global_inst_shp,
                 "agent_summary_json": current_agent_summary_json,
                 "optuna_best_json": current_optuna_best_json,
+                "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
             }
             finetune_prev = stage_outputs_or_none(state, "finetune")
             if finetune_prev:
                 summary["final_artifacts"]["finetune_summary_json"] = finetune_prev.get("finetune_summary_json")
             save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
             return
-
-
 
         state["status"] = "success"
         save_pipeline_state(pipeline_root, state)
@@ -1170,6 +1275,7 @@ def main():
             "global_inst_shp": current_global_inst_shp,
             "agent_summary_json": current_agent_summary_json,
             "optuna_best_json": current_optuna_best_json,
+            "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
         }
         summary["pipeline_state_json"] = str(pipeline_root / "pipeline_state.json")
         save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
@@ -1182,6 +1288,7 @@ def main():
         "global_inst_shp": current_global_inst_shp,
         "agent_summary_json": current_agent_summary_json,
         "optuna_best_json": current_optuna_best_json,
+        "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
     }
     summary["pipeline_state_json"] = str(pipeline_root / "pipeline_state.json")
     save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
