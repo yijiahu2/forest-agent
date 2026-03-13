@@ -38,3 +38,19 @@ tests2 = [
 ]
 for slope, rel, tpi, fa in tests2:
     print(slope, rel, tpi, fa, classify_slope_position_class(slope, rel, tpi, fa))
+
+
+
+
+
+
+python -m geo_layer.spatial_context \
+  --dom_tif /mnt/e/Learning_documents/DEM/dom197.tif \
+  --dem_tif /mnt/e/Learning_documents/DEM/shanxia_DEM1m.tif \
+  --xiaoban_shp /mnt/e/Learning_documents/output/shp/xiaoban29pro.shp \
+  --out_dir /mnt/e/Learning_documents/output/test_spatial_context \
+  --xiaoban_id_field XBH \
+  --tree_count_field LMSL \
+  --crown_field PJGF \
+  --closure_field YBD \
+  --area_ha_field MJ_hm2
