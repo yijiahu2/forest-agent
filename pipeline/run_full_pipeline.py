@@ -309,9 +309,19 @@ def maybe_prepare_spatial_context_runtime_config(
         cfg["slope_tif"] = result["slope_tif"]
     if result.get("aspect_tif"):
         cfg["aspect_tif"] = result["aspect_tif"]
+    if result.get("landform_tif"):
+        cfg["landform_tif"] = result["landform_tif"]
+    if result.get("slope_position_tif"):
+        cfg["slope_position_tif"] = result["slope_position_tif"]
     if result.get("xiaoban_shp"):
         cfg["xiaoban_shp"] = result["xiaoban_shp"]
 
+    cfg["terrain_landform_field"] = "landform_type"
+    cfg["terrain_slope_class_field"] = "slope_class"
+    cfg["terrain_aspect_class_field"] = "aspect_class"
+    cfg["terrain_slope_position_field"] = "slope_position_class"
+    cfg["flat_slope_threshold_deg"] = cfg.get("flat_slope_threshold_deg", 5.0)
+    cfg["plain_relief_threshold_m"] = cfg.get("plain_relief_threshold_m", 30.0)
     cfg["spatial_context_summary_json"] = result.get("summary_json")
 
     temp_cfg = pipeline_root / "runtime_base_config.yaml"
@@ -514,7 +524,6 @@ def run_optuna_multi_stage(
         "storage": best_data.get("storage"),
     }
 
-
 def run_local_refine_stage(
     base_config_path: str,
     global_details_csv: str,
@@ -527,7 +536,24 @@ def run_local_refine_stage(
     dem_tif: Optional[str] = None,
     slope_tif: Optional[str] = None,
     aspect_tif: Optional[str] = None,
+    landform_tif: Optional[str] = None,
+    slope_position_tif: Optional[str] = None,
+    flat_slope_threshold_deg: float = 5.0,
+    plain_relief_threshold_m: float = 30.0,
 ) -> Dict[str, Any]:
+    """
+    执行 local refine 阶段，并返回标准化结果摘要。
+
+    当前职责：
+    1. 将 baseline/global 结果与最优参数送入 run_local_refinement
+    2. 透传 ROI 级 terrain 输入（DEM / slope / aspect）
+    3. 在 stage 输出中补充 terrain 约束规范信息，便于 pipeline summary 统一表达
+
+    说明：
+    - 当前主线真正参与 local refine 的 terrain 输入仍主要是 dem_tif / slope_tif / aspect_tif
+    - landform_tif / slope_position_tif 先作为保留字段，便于后续扩展，不要求 run_local_refinement 立刻使用
+    """
+
     summary = run_local_refinement(
         base_config_path=base_config_path,
         global_details_csv=global_details_csv,
@@ -542,14 +568,36 @@ def run_local_refine_stage(
         aspect_tif=aspect_tif,
     )
 
+    terrain_inputs = {
+        "dem_tif": dem_tif,
+        "slope_tif": slope_tif,
+        "aspect_tif": aspect_tif,
+        "landform_tif": landform_tif,
+        "slope_position_tif": slope_position_tif,
+    }
+
+    terrain_rule_config = {
+        "flat_slope_threshold_deg": flat_slope_threshold_deg,
+        "plain_relief_threshold_m": plain_relief_threshold_m,
+    }
+
+    terrain_constraint_fields = {
+        "terrain_landform_field": "landform_type",
+        "terrain_slope_class_field": "slope_class",
+        "terrain_aspect_class_field": "aspect_class",
+        "terrain_slope_position_field": "slope_position_class",
+    }
+
     return {
         "local_refine_summary": summary,
         "merged_shp": summary.get("merged_shp"),
         "merged_metrics_json": summary.get("merged_metrics_json"),
         "merged_details_csv": summary.get("merged_details_csv"),
         "compare_json": summary.get("compare_json"),
+        "terrain_inputs": terrain_inputs,
+        "terrain_rule_config": terrain_rule_config,
+        "terrain_constraint_fields": terrain_constraint_fields,
     }
-
 
 # =========================
 # pipeline state management

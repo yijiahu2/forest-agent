@@ -1,6 +1,9 @@
 import sys
 from pathlib import Path
-
+from geo_layer.terrain_constraints import (
+    TerrainRuleConfig,
+    summarize_terrain_classes,
+)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -359,81 +362,174 @@ def attach_terrain_stats_to_xiaoban_clip(
     dem_tif: Optional[str] = None,
     slope_tif: Optional[str] = None,
     aspect_tif: Optional[str] = None,
+    flat_slope_threshold_deg: float = 5.0,
+    plain_relief_threshold_m: float = 30.0,
 ) -> gpd.GeoDataFrame:
     """
-    给每个 clipped 小班附加 terrain 统计字段。
+    给每个 clipped 小班附加 terrain 统计字段，并规范输出 DEM 四元组：
+    - elevation_mean_m
+    - relief_10km_m
+    - slope_mean_deg
+    - aspect_mean_deg
+    - landform_type
+    - slope_class
+    - aspect_class
+    - slope_position_class
     """
     out = xiaoban_clip_gdf.copy()
+    rule_cfg = TerrainRuleConfig(
+        flat_slope_threshold_deg=flat_slope_threshold_deg,
+        plain_relief_threshold_m=plain_relief_threshold_m,
+    )
 
-    if dem_tif is not None:
-        mean_elev_list = []
-        std_elev_list = []
-        relief_elev_list = []
+    mean_elev_list = []
+    std_elev_list = []
+    relief_elev_list = []
+    mean_slope_list = []
+    std_slope_list = []
+    mean_aspect_list = []
 
-        for _, row in out.iterrows():
-            geom_gdf = gpd.GeoDataFrame({"id": [1]}, geometry=[row.geometry], crs=out.crs)
-            st = raster_stats_for_geom(dem_tif, geom_gdf)
-            mean_elev_list.append(st["mean"])
-            std_elev_list.append(st["std"])
-            relief_elev_list.append(st["relief"])
+    landform_type_list = []
+    landform_type_cn_list = []
+    slope_class_list = []
+    slope_class_cn_list = []
+    aspect_class_list = []
+    aspect_class_cn_list = []
+    slope_position_class_list = []
+    slope_position_class_cn_list = []
+    rel_norm_list = []
 
-        out["mean_elev"] = mean_elev_list
-        out["std_elev"] = std_elev_list
-        out["relief_elev"] = relief_elev_list
+    for _, row in out.iterrows():
+        geom_gdf = gpd.GeoDataFrame({"id": [1]}, geometry=[row.geometry], crs=out.crs)
 
-    if slope_tif is not None:
-        mean_slope_list = []
-        std_slope_list = []
+        dem_st = raster_stats_for_geom(dem_tif, geom_gdf) if dem_tif is not None else {}
+        slope_st = raster_stats_for_geom(slope_tif, geom_gdf) if slope_tif is not None else {}
+        aspect_st = aspect_stats_for_geom(aspect_tif, geom_gdf) if aspect_tif is not None else {}
 
-        for _, row in out.iterrows():
-            geom_gdf = gpd.GeoDataFrame({"id": [1]}, geometry=[row.geometry], crs=out.crs)
-            st = raster_stats_for_geom(slope_tif, geom_gdf)
-            mean_slope_list.append(st["mean"])
-            std_slope_list.append(st["std"])
+        mean_elev = dem_st.get("mean")
+        std_elev = dem_st.get("std")
+        relief_elev = dem_st.get("relief")
+        mean_slope = slope_st.get("mean")
+        std_slope = slope_st.get("std")
+        mean_aspect = aspect_st.get("mean_aspect_deg")
 
-        out["mean_slope"] = mean_slope_list
-        out["std_slope"] = std_slope_list
+        rel_norm = None
+        dem_min = dem_st.get("min")
+        dem_max = dem_st.get("max")
+        if mean_elev is not None and dem_min is not None and dem_max is not None and dem_max > dem_min:
+            rel_norm = float((mean_elev - dem_min) / (dem_max - dem_min))
+        elif mean_elev is not None:
+            rel_norm = 0.5
 
-    if aspect_tif is not None:
-        mean_aspect_list = []
-        dominant_aspect_list = []
+        terrain_summary = summarize_terrain_classes(
+            elevation_mean_m=mean_elev,
+            relief_10km_m=relief_elev,
+            slope_mean_deg=mean_slope,
+            aspect_mean_deg=mean_aspect,
+            relative_elevation_norm=rel_norm,
+            tpi_local=None,
+            flow_accumulation_proxy=None,
+            rule_cfg=rule_cfg,
+        )
 
-        for _, row in out.iterrows():
-            geom_gdf = gpd.GeoDataFrame({"id": [1]}, geometry=[row.geometry], crs=out.crs)
-            st = aspect_stats_for_geom(aspect_tif, geom_gdf)
-            mean_aspect_list.append(st["mean_aspect_deg"])
-            dominant_aspect_list.append(st["dominant_aspect_class"])
+        mean_elev_list.append(mean_elev)
+        std_elev_list.append(std_elev)
+        relief_elev_list.append(relief_elev)
+        mean_slope_list.append(mean_slope)
+        std_slope_list.append(std_slope)
+        mean_aspect_list.append(mean_aspect)
+        rel_norm_list.append(rel_norm)
 
-        out["mean_aspect_deg"] = mean_aspect_list
-        out["dominant_aspect_class"] = dominant_aspect_list
+        landform_type_list.append(terrain_summary["landform_type"])
+        landform_type_cn_list.append(terrain_summary["landform_type_cn"])
+        slope_class_list.append(terrain_summary["slope_class"])
+        slope_class_cn_list.append(terrain_summary["slope_class_cn"])
+        aspect_class_list.append(terrain_summary["aspect_class"])
+        aspect_class_cn_list.append(terrain_summary["aspect_class_cn"])
+        slope_position_class_list.append(terrain_summary["slope_position_class"])
+        slope_position_class_cn_list.append(terrain_summary["slope_position_class_cn"])
+
+    out["elevation_mean_m"] = mean_elev_list
+    out["elevation_std_m"] = std_elev_list
+    out["relief_10km_m"] = relief_elev_list
+    out["slope_mean_deg"] = mean_slope_list
+    out["slope_std_deg"] = std_slope_list
+    out["aspect_mean_deg"] = mean_aspect_list
+    out["relative_elevation_norm"] = rel_norm_list
+
+    out["landform_type"] = landform_type_list
+    out["landform_type_cn"] = landform_type_cn_list
+    out["slope_class"] = slope_class_list
+    out["slope_class_cn"] = slope_class_cn_list
+    out["aspect_class"] = aspect_class_list
+    out["aspect_class_cn"] = aspect_class_cn_list
+    out["slope_position_class"] = slope_position_class_list
+    out["slope_position_class_cn"] = slope_position_class_cn_list
+
+    # 兼容旧字段，避免影响下游
+    out["mean_elev"] = out["elevation_mean_m"]
+    out["std_elev"] = out["elevation_std_m"]
+    out["relief_elev"] = out["relief_10km_m"]
+    out["mean_slope"] = out["slope_mean_deg"]
+    out["std_slope"] = out["slope_std_deg"]
+    out["mean_aspect_deg"] = out["aspect_mean_deg"]
+    out["dominant_aspect_class"] = out["aspect_class"]
 
     return out
-
 
 def compute_patch_terrain_metrics(
     patch_gdf: gpd.GeoDataFrame,
     dem_tif: Optional[str] = None,
     slope_tif: Optional[str] = None,
     aspect_tif: Optional[str] = None,
+    flat_slope_threshold_deg: float = 5.0,
+    plain_relief_threshold_m: float = 30.0,
 ) -> Dict[str, Any]:
     metrics = {}
+    dem_st = raster_stats_for_geom(dem_tif, patch_gdf) if dem_tif is not None else {}
+    slope_st = raster_stats_for_geom(slope_tif, patch_gdf) if slope_tif is not None else {}
+    aspect_st = aspect_stats_for_geom(aspect_tif, patch_gdf) if aspect_tif is not None else {}
 
-    if dem_tif is not None:
-        st = raster_stats_for_geom(dem_tif, patch_gdf)
-        metrics["patch_mean_elev"] = st["mean"]
-        metrics["patch_std_elev"] = st["std"]
-        metrics["patch_relief_elev"] = st["relief"]
+    metrics["patch_mean_elev"] = dem_st.get("mean")
+    metrics["patch_std_elev"] = dem_st.get("std")
+    metrics["patch_relief_elev"] = dem_st.get("relief")
+    metrics["patch_mean_slope"] = slope_st.get("mean")
+    metrics["patch_std_slope"] = slope_st.get("std")
+    metrics["patch_mean_aspect_deg"] = aspect_st.get("mean_aspect_deg")
 
-    if slope_tif is not None:
-        st = raster_stats_for_geom(slope_tif, patch_gdf)
-        metrics["patch_mean_slope"] = st["mean"]
-        metrics["patch_std_slope"] = st["std"]
+    rel_norm = None
+    if dem_st.get("mean") is not None and dem_st.get("min") is not None and dem_st.get("max") is not None:
+        if dem_st["max"] > dem_st["min"]:
+            rel_norm = float((dem_st["mean"] - dem_st["min"]) / (dem_st["max"] - dem_st["min"]))
+        else:
+            rel_norm = 0.5
 
-    if aspect_tif is not None:
-        st = aspect_stats_for_geom(aspect_tif, patch_gdf)
-        metrics["patch_mean_aspect_deg"] = st["mean_aspect_deg"]
-        metrics["patch_dominant_aspect_class"] = st["dominant_aspect_class"]
+    terrain_summary = summarize_terrain_classes(
+        elevation_mean_m=dem_st.get("mean"),
+        relief_10km_m=dem_st.get("relief"),
+        slope_mean_deg=slope_st.get("mean"),
+        aspect_mean_deg=aspect_st.get("mean_aspect_deg"),
+        relative_elevation_norm=rel_norm,
+        tpi_local=None,
+        flow_accumulation_proxy=None,
+        rule_cfg=TerrainRuleConfig(
+            flat_slope_threshold_deg=flat_slope_threshold_deg,
+            plain_relief_threshold_m=plain_relief_threshold_m,
+        ),
+    )
 
+    metrics.update(
+        {
+            "patch_landform_type": terrain_summary["landform_type"],
+            "patch_landform_type_cn": terrain_summary["landform_type_cn"],
+            "patch_slope_class": terrain_summary["slope_class"],
+            "patch_slope_class_cn": terrain_summary["slope_class_cn"],
+            "patch_aspect_class": terrain_summary["aspect_class"],
+            "patch_aspect_class_cn": terrain_summary["aspect_class_cn"],
+            "patch_slope_position_class": terrain_summary["slope_position_class"],
+            "patch_slope_position_class_cn": terrain_summary["slope_position_class_cn"],
+        }
+    )
     return metrics
 
 
@@ -661,6 +757,36 @@ def compute_xiaoban_level_details(
             row["mean_aspect_deg"] = safe_float(xb["mean_aspect_deg"])
         if "dominant_aspect_class" in xb.index:
             row["dominant_aspect_class"] = xb["dominant_aspect_class"]
+        if "elevation_mean_m" in xb.index:
+            row["elevation_mean_m"] = safe_float(xb["elevation_mean_m"])
+        if "elevation_std_m" in xb.index:
+            row["elevation_std_m"] = safe_float(xb["elevation_std_m"])
+        if "relief_10km_m" in xb.index:
+            row["relief_10km_m"] = safe_float(xb["relief_10km_m"])
+        if "slope_mean_deg" in xb.index:
+            row["slope_mean_deg"] = safe_float(xb["slope_mean_deg"])
+        if "slope_std_deg" in xb.index:
+            row["slope_std_deg"] = safe_float(xb["slope_std_deg"])
+        if "aspect_mean_deg" in xb.index:
+            row["aspect_mean_deg"] = safe_float(xb["aspect_mean_deg"])
+        if "relative_elevation_norm" in xb.index:
+            row["relative_elevation_norm"] = safe_float(xb["relative_elevation_norm"])
+        if "landform_type" in xb.index:
+            row["landform_type"] = xb["landform_type"]
+        if "landform_type_cn" in xb.index:
+            row["landform_type_cn"] = xb["landform_type_cn"]
+        if "slope_class" in xb.index:
+            row["slope_class"] = xb["slope_class"]
+        if "slope_class_cn" in xb.index:
+            row["slope_class_cn"] = xb["slope_class_cn"]
+        if "aspect_class" in xb.index:
+            row["aspect_class"] = xb["aspect_class"]
+        if "aspect_class_cn" in xb.index:
+            row["aspect_class_cn"] = xb["aspect_class_cn"]
+        if "slope_position_class" in xb.index:
+            row["slope_position_class"] = xb["slope_position_class"]
+        if "slope_position_class_cn" in xb.index:
+            row["slope_position_class_cn"] = xb["slope_position_class_cn"]
 
         rows.append(row)
 
@@ -687,6 +813,9 @@ def main():
     parser.add_argument("--dem_tif", default=None, help="Optional DEM tif")
     parser.add_argument("--slope_tif", default=None, help="Optional precomputed slope tif")
     parser.add_argument("--aspect_tif", default=None, help="Optional precomputed aspect tif")
+    parser.add_argument("--flat_slope_threshold_deg", type=float, default=5.0, help="坡向无向阈值，默认5°")
+    parser.add_argument("--plain_relief_threshold_m", type=float, default=30.0, help="平原起伏阈值，默认30m")
+
 
     args = parser.parse_args()
 
@@ -734,6 +863,8 @@ def main():
         dem_tif=terrain_info["dem_tif"],
         slope_tif=terrain_info["slope_tif"],
         aspect_tif=terrain_info["aspect_tif"],
+        flat_slope_threshold_deg=args.flat_slope_threshold_deg,
+        plain_relief_threshold_m=args.plain_relief_threshold_m,
     )
 
     patch_terrain_metrics = compute_patch_terrain_metrics(
@@ -741,6 +872,8 @@ def main():
         dem_tif=terrain_info["dem_tif"],
         slope_tif=terrain_info["slope_tif"],
         aspect_tif=terrain_info["aspect_tif"],
+        flat_slope_threshold_deg=args.flat_slope_threshold_deg,
+        plain_relief_threshold_m=args.plain_relief_threshold_m,
     )
 
     # 3. instances

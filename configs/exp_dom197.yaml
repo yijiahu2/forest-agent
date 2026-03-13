@@ -23,6 +23,14 @@ crown_field: "PJGF"
 closure_field: "YBD"
 area_ha_field: "MJ_hm2"
 
+flat_slope_threshold_deg: 5.0
+plain_relief_threshold_m: 30.0
+
+terrain_landform_field: landform_type
+terrain_slope_class_field: slope_class
+terrain_aspect_class_field: aspect_class
+terrain_slope_position_field: slope_position_class
+
 stage1_script: stage1_segformer_sliding.py
 stage2_script: stage2_cellpose_sam_sliding_v2.py
 

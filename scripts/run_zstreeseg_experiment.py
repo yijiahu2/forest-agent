@@ -305,7 +305,6 @@ def run_stage2(cfg: Dict[str, Any], m_sem_tif: str) -> Dict[str, Any]:
         "y_inst_color_png": paths["y_inst_color_png"],
     }
 
-
 def run_evaluation(cfg: Dict[str, Any], inst_shp: str, terrain_info: Dict[str, Any]) -> Dict[str, Any]:
     eval_paths = get_eval_output_paths(cfg)
     ensure_parent(eval_paths["metrics_json"])
@@ -315,53 +314,50 @@ def run_evaluation(cfg: Dict[str, Any], inst_shp: str, terrain_info: Dict[str, A
         "python",
         "-m",
         "scripts.evaluate_xiaoban_consistency",
-        "--inst_shp",
-        inst_shp,
-        "--patch_raster",
-        cfg["input_image"],
-        "--xiaoban_shp",
-        cfg["xiaoban_shp"],
-        "--out_json",
-        eval_paths["metrics_json"],
-        "--out_csv",
-        eval_paths["details_csv"],
-        "--id_field",
-        cfg["xiaoban_id_field"],
-        "--tree_count_field",
-        cfg["tree_count_field"],
-        "--crown_field",
-        cfg["crown_field"],
-        "--closure_field",
-        cfg["closure_field"],
-        "--area_ha_field",
-        cfg["area_ha_field"],
+        "--inst_shp", inst_shp,
+        "--patch_raster", cfg["input_image"],
+        "--xiaoban_shp", cfg["xiaoban_shp"],
+        "--out_json", eval_paths["metrics_json"],
+        "--out_csv", eval_paths["details_csv"],
+        "--id_field", cfg["xiaoban_id_field"],
+        "--tree_count_field", cfg["tree_count_field"],
+        "--crown_field", cfg["crown_field"],
+        "--closure_field", cfg["closure_field"],
+        "--area_ha_field", cfg["area_ha_field"],
     ]
 
     if cfg.get("density_field"):
-        cmd.extend(["--density_field", cfg["density_field"]])
+        cmd.extend(["--density_field", str(cfg["density_field"])])
+
     if terrain_info.get("dem_tif"):
-        cmd.extend(["--dem_tif", terrain_info["dem_tif"]])
+        cmd.extend(["--dem_tif", str(terrain_info["dem_tif"])])
     if terrain_info.get("slope_tif"):
-        cmd.extend(["--slope_tif", terrain_info["slope_tif"]])
+        cmd.extend(["--slope_tif", str(terrain_info["slope_tif"])])
     if terrain_info.get("aspect_tif"):
-        cmd.extend(["--aspect_tif", terrain_info["aspect_tif"]])
+        cmd.extend(["--aspect_tif", str(terrain_info["aspect_tif"])])
 
-    res = run_cmd(cmd, cwd=str(PROJECT_ROOT))
-    if res.returncode != 0:
-        raise RuntimeError(f"Evaluation failed:\n{res.stderr}")
+    # 新增 terrain 规则参数
+    cmd.extend([
+        "--flat_slope_threshold_deg", str(cfg.get("flat_slope_threshold_deg", 5.0)),
+        "--plain_relief_threshold_m", str(cfg.get("plain_relief_threshold_m", 30.0)),
+    ])
 
-    require_file(eval_paths["metrics_json"], "metrics.json")
-    require_file(eval_paths["details_csv"], "details.csv")
+    res = run_cmd(cmd)
+    if res["returncode"] != 0:
+        raise RuntimeError(f"Evaluation failed:\n{res['stderr']}")
 
-    metrics = load_json(eval_paths["metrics_json"])
-    if not metrics:
-        raise RuntimeError("Evaluation produced empty metrics.json")
+    require_file(eval_paths["metrics_json"], "Evaluation metrics_json")
+    require_file(eval_paths["details_csv"], "Evaluation details_csv")
 
     return {
         "cmd": cmd,
         "metrics_json": eval_paths["metrics_json"],
         "details_csv": eval_paths["details_csv"],
-        "metrics": metrics,
+        "terrain_info": terrain_info,
+        "terrain_rule_config": {
+            "flat_slope_threshold_deg": cfg.get("flat_slope_threshold_deg", 5.0),
+            "plain_relief_threshold_m": cfg.get("plain_relief_threshold_m", 30.0),
+        },
     }
 
 
@@ -417,6 +413,12 @@ def log_to_mlflow(
 
 def run_experiment(config_path: str) -> Dict[str, Any]:
     cfg = load_yaml(config_path)
+    cfg["flat_slope_threshold_deg"] = cfg.get("flat_slope_threshold_deg", 5.0)
+    cfg["plain_relief_threshold_m"] = cfg.get("plain_relief_threshold_m", 30.0)
+    cfg["terrain_landform_field"] = cfg.get("terrain_landform_field", "landform_type")
+    cfg["terrain_slope_class_field"] = cfg.get("terrain_slope_class_field", "slope_class")
+    cfg["terrain_aspect_class_field"] = cfg.get("terrain_aspect_class_field", "aspect_class")
+    cfg["terrain_slope_position_field"] = cfg.get("terrain_slope_position_field", "slope_position_class")
 
     required_keys = [
         "input_image",

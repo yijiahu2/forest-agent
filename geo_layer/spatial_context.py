@@ -13,6 +13,7 @@ from rasterio.mask import mask
 from shapely.geometry import box
 
 from geo_layer.terrain_features import generate_terrain_products
+from geo_layer.terrain_constraints import summarize_terrain_classes, TerrainRuleConfig
 
 
 def ensure_parent(path: str | Path) -> None:
@@ -21,6 +22,21 @@ def ensure_parent(path: str | Path) -> None:
 
 def ensure_dir(path: str | Path) -> None:
     Path(path).mkdir(parents=True, exist_ok=True)
+
+
+def write_vector_auto(gdf: gpd.GeoDataFrame, out_path: str | Path, layer: Optional[str] = None) -> str:
+    out_path = Path(out_path)
+    ensure_parent(out_path)
+
+    suffix = out_path.suffix.lower()
+    if suffix == ".gpkg":
+        out_layer = layer or out_path.stem
+        gdf.to_file(out_path, driver="GPKG", layer=out_layer)
+    elif suffix == ".shp":
+        gdf.to_file(out_path)
+    else:
+        raise ValueError(f"Unsupported vector output format: {out_path}")
+    return str(out_path)
 
 
 def safe_float(v, default=None):
@@ -41,13 +57,12 @@ def load_dom_bounds(dom_tif: str | Path) -> Tuple[Any, Any, Dict[str, float]]:
             raise ValueError(f"DOM has no CRS: {dom_tif}")
         bounds = src.bounds
         profile = src.profile.copy()
-
-    bounds_dict = {
-        "left": float(bounds.left),
-        "bottom": float(bounds.bottom),
-        "right": float(bounds.right),
-        "top": float(bounds.top),
-    }
+        bounds_dict = {
+            "left": float(bounds.left),
+            "bottom": float(bounds.bottom),
+            "right": float(bounds.right),
+            "top": float(bounds.top),
+        }
     return crs, profile, bounds_dict
 
 
@@ -60,13 +75,14 @@ def build_bounds_gdf(bounds_dict: Dict[str, float], crs) -> gpd.GeoDataFrame:
     )
     return gpd.GeoDataFrame({"_id": [1]}, geometry=[geom], crs=crs)
 
+
 def crop_raster_to_geometry(
     src_raster: str | Path,
     geom_gdf: gpd.GeoDataFrame,
     out_raster: str | Path,
     all_touched: bool = False,
 ) -> str:
-    from shapely.geometry import box
+    from shapely.geometry import box as shp_box
 
     with rasterio.open(src_raster) as src:
         if src.crs is None:
@@ -77,8 +93,8 @@ def crop_raster_to_geometry(
         if geom_in_src.empty:
             raise ValueError(f"No valid geometry for raster crop: {src_raster}")
 
-        raster_bounds_geom = box(*src.bounds)
-        geom_union = geom_in_src.unary_union
+        raster_bounds_geom = shp_box(*src.bounds)
+        geom_union = geom_in_src.geometry.union_all()
 
         print("\n[spatial_context] crop check")
         print("src_raster:", src_raster)
@@ -105,7 +121,6 @@ def crop_raster_to_geometry(
             )
 
         geoms = [g.__geo_interface__ for g in geom_in_src.geometry if g is not None and not g.is_empty]
-
         out_image, out_transform = mask(
             src,
             geoms,
@@ -124,30 +139,80 @@ def crop_raster_to_geometry(
             }
         )
 
-    ensure_parent(out_raster)
-    with rasterio.open(out_raster, "w", **out_meta) as dst:
-        dst.write(out_image)
+        ensure_parent(out_raster)
+        with rasterio.open(out_raster, "w", **out_meta) as dst:
+            dst.write(out_image)
 
     return str(out_raster)
-
 
 
 def _get_metric_crs(gdf: gpd.GeoDataFrame):
     if gdf.crs is None:
         raise ValueError("GeoDataFrame has no CRS.")
-
     if getattr(gdf.crs, "is_projected", False):
         return gdf.crs
-
     try:
         utm_crs = gdf.estimate_utm_crs()
         if utm_crs is not None:
             return utm_crs
     except Exception:
         pass
-
-    # 保底 Web Mercator，仅作为面积近似
     return "EPSG:3857"
+
+
+def _masked_values_from_geom(raster_path: str, geom_gdf: gpd.GeoDataFrame) -> np.ndarray:
+    with rasterio.open(raster_path) as src:
+        geom = geom_gdf.to_crs(src.crs)
+        geoms = [g.__geo_interface__ for g in geom.geometry if g is not None and not g.is_empty]
+        if not geoms:
+            return np.array([], dtype=np.float32)
+
+        out_image, _ = mask(src, geoms, crop=True, filled=False)
+        band = out_image[0]
+        vals = band.compressed() if np.ma.isMaskedArray(band) else band.reshape(-1)
+        vals = np.asarray(vals, dtype=np.float32)
+        vals = vals[np.isfinite(vals)]
+
+        nodata = src.nodata
+        if nodata is not None:
+            vals = vals[~np.isclose(vals, nodata)]
+        return vals
+
+
+def raster_stats_for_geom(raster_path: str, geom_gdf: gpd.GeoDataFrame) -> Dict[str, Optional[float]]:
+    vals = _masked_values_from_geom(raster_path, geom_gdf)
+    if len(vals) == 0:
+        return {"mean": None, "std": None, "min": None, "max": None, "relief": None, "count": 0}
+    return {
+        "mean": float(np.mean(vals)),
+        "std": float(np.std(vals)),
+        "min": float(np.min(vals)),
+        "max": float(np.max(vals)),
+        "relief": float(np.max(vals) - np.min(vals)),
+        "count": int(len(vals)),
+    }
+
+
+def circular_mean_deg(values: np.ndarray) -> Optional[float]:
+    vals = np.asarray(values, dtype=float)
+    vals = vals[np.isfinite(vals)]
+    if len(vals) == 0:
+        return None
+    rad = np.deg2rad(vals)
+    sin_m = np.mean(np.sin(rad))
+    cos_m = np.mean(np.cos(rad))
+    ang = np.rad2deg(np.arctan2(sin_m, cos_m))
+    return float((ang + 360.0) % 360.0)
+
+
+def aspect_stats_for_geom(aspect_raster_path: str, geom_gdf: gpd.GeoDataFrame) -> Dict[str, Any]:
+    vals = _masked_values_from_geom(aspect_raster_path, geom_gdf)
+    if len(vals) == 0:
+        return {"mean_aspect_deg": None, "aspect_count": 0}
+    return {
+        "mean_aspect_deg": circular_mean_deg(vals),
+        "aspect_count": int(len(vals)),
+    }
 
 
 def enrich_xiaoban_clip_fields(
@@ -159,21 +224,11 @@ def enrich_xiaoban_clip_fields(
     closure_field: Optional[str] = None,
     area_ha_field: Optional[str] = None,
     density_field: Optional[str] = None,
+    dem_tif: Optional[str] = None,
+    slope_tif: Optional[str] = None,
+    aspect_tif: Optional[str] = None,
+    terrain_rule_cfg: Optional[TerrainRuleConfig] = None,
 ) -> gpd.GeoDataFrame:
-    """
-    对裁剪后小班补充局部字段：
-    - orig_geom_area_m2
-    - inventory_area_m2
-    - clip_area_m2
-    - clip_area_ha
-    - overlap_ratio_geom
-    - overlap_ratio_inventory
-    - overlap_ratio_in_xiaoban  (优先 inventory)
-    - est_tree_count_clip
-    - est_density_per_ha
-    - est_tree_count_by_clip_area
-    """
-
     if xiaoban_id_field not in clipped_gdf.columns:
         raise ValueError(f"Missing xiaoban id field in clipped gdf: {xiaoban_id_field}")
     if xiaoban_id_field not in source_gdf.columns:
@@ -186,18 +241,21 @@ def enrich_xiaoban_clip_fields(
     source[xiaoban_id_field] = source[xiaoban_id_field].astype(str)
 
     metric_crs = _get_metric_crs(clipped)
-
     source_metric = source[[xiaoban_id_field, "geometry"]].copy().to_crs(metric_crs)
     source_metric["orig_geom_area_m2"] = source_metric.geometry.area.astype(float)
 
-    source_area_cols = [xiaoban_id_field, "orig_geom_area_m2"]
     if area_ha_field and area_ha_field in source.columns:
         src_area_df = source[[xiaoban_id_field, area_ha_field]].copy()
         src_area_df[area_ha_field] = pd.to_numeric(src_area_df[area_ha_field], errors="coerce")
         src_area_df["inventory_area_m2"] = src_area_df[area_ha_field] * 10000.0
         source_area_cols_df = src_area_df[[xiaoban_id_field, "inventory_area_m2"]]
     else:
-        source_area_cols_df = pd.DataFrame({xiaoban_id_field: source[xiaoban_id_field].astype(str), "inventory_area_m2": np.nan})
+        source_area_cols_df = pd.DataFrame(
+            {
+                xiaoban_id_field: source[xiaoban_id_field].astype(str),
+                "inventory_area_m2": np.nan,
+            }
+        )
 
     source_area = source_metric[[xiaoban_id_field, "orig_geom_area_m2"]].merge(
         source_area_cols_df,
@@ -208,16 +266,15 @@ def enrich_xiaoban_clip_fields(
     clipped_metric = clipped.to_crs(metric_crs)
     clipped["clip_area_m2"] = clipped_metric.geometry.area.astype(float)
     clipped["clip_area_ha"] = clipped["clip_area_m2"] / 10000.0
-
     clipped = clipped.merge(source_area, on=xiaoban_id_field, how="left")
 
     clipped["overlap_ratio_geom"] = clipped["clip_area_m2"] / clipped["orig_geom_area_m2"].replace(0, pd.NA)
     clipped["overlap_ratio_inventory"] = clipped["clip_area_m2"] / clipped["inventory_area_m2"].replace(0, pd.NA)
-
     clipped["overlap_ratio_in_xiaoban"] = clipped["overlap_ratio_inventory"]
-    use_geom_mask = clipped["overlap_ratio_in_xiaoban"].isna() | ~np.isfinite(clipped["overlap_ratio_in_xiaoban"].astype(float))
-    clipped.loc[use_geom_mask, "overlap_ratio_in_xiaoban"] = clipped.loc[use_geom_mask, "overlap_ratio_geom"]
 
+    overlap_numeric = pd.to_numeric(clipped["overlap_ratio_in_xiaoban"], errors="coerce")
+    use_geom_mask = overlap_numeric.isna() | ~np.isfinite(overlap_numeric)
+    clipped.loc[use_geom_mask, "overlap_ratio_in_xiaoban"] = clipped.loc[use_geom_mask, "overlap_ratio_geom"]
     clipped["overlap_ratio_in_xiaoban"] = clipped["overlap_ratio_in_xiaoban"].fillna(0.0).clip(lower=0.0, upper=1.0)
 
     if tree_count_field and tree_count_field in clipped.columns:
@@ -234,11 +291,88 @@ def enrich_xiaoban_clip_fields(
         clipped["est_density_per_ha"] = clipped[tree_count_field] / clipped[area_ha_field].replace(0, pd.NA)
         clipped["est_tree_count_by_clip_area"] = clipped["est_density_per_ha"] * clipped["clip_area_ha"]
 
-    # 均值型字段原则上保持原值，作为局部先验
     if crown_field and crown_field in clipped.columns:
         clipped[crown_field] = pd.to_numeric(clipped[crown_field], errors="coerce")
     if closure_field and closure_field in clipped.columns:
         clipped[closure_field] = pd.to_numeric(clipped[closure_field], errors="coerce")
+
+    if dem_tif or slope_tif or aspect_tif:
+        mean_elev_list = []
+        relief_elev_list = []
+        mean_slope_list = []
+        mean_aspect_deg_list = []
+        landform_type_list = []
+        landform_type_cn_list = []
+        slope_class_list = []
+        slope_class_cn_list = []
+        aspect_class_list = []
+        aspect_class_cn_list = []
+        rel_norm_list = []
+        slope_position_class_list = []
+        slope_position_class_cn_list = []
+
+        rule_cfg = terrain_rule_cfg or TerrainRuleConfig()
+
+        for _, row in clipped.iterrows():
+            geom_gdf = gpd.GeoDataFrame({"id": [1]}, geometry=[row.geometry], crs=clipped.crs)
+
+            dem_st = raster_stats_for_geom(dem_tif, geom_gdf) if dem_tif else {}
+            slope_st = raster_stats_for_geom(slope_tif, geom_gdf) if slope_tif else {}
+            aspect_st = aspect_stats_for_geom(aspect_tif, geom_gdf) if aspect_tif else {}
+
+            mean_elev = dem_st.get("mean")
+            relief_elev = dem_st.get("relief")
+            mean_slope = slope_st.get("mean")
+            mean_aspect_deg = aspect_st.get("mean_aspect_deg")
+
+            rel_norm = None
+            if mean_elev is not None and dem_st.get("min") is not None and dem_st.get("max") is not None:
+                dem_min = dem_st.get("min")
+                dem_max = dem_st.get("max")
+                if dem_max is not None and dem_min is not None and dem_max > dem_min:
+                    rel_norm = float((mean_elev - dem_min) / (dem_max - dem_min))
+                else:
+                    rel_norm = 0.5
+
+            terrain_summary = summarize_terrain_classes(
+                elevation_mean_m=mean_elev,
+                relief_10km_m=relief_elev,
+                slope_mean_deg=mean_slope,
+                aspect_mean_deg=mean_aspect_deg,
+                relative_elevation_norm=rel_norm,
+                tpi_local=None,
+                flow_accumulation_proxy=None,
+                rule_cfg=rule_cfg,
+            )
+
+            mean_elev_list.append(mean_elev)
+            relief_elev_list.append(relief_elev)
+            mean_slope_list.append(mean_slope)
+            mean_aspect_deg_list.append(mean_aspect_deg)
+            rel_norm_list.append(rel_norm)
+            landform_type_list.append(terrain_summary["landform_type"])
+            landform_type_cn_list.append(terrain_summary["landform_type_cn"])
+            slope_class_list.append(terrain_summary["slope_class"])
+            slope_class_cn_list.append(terrain_summary["slope_class_cn"])
+            aspect_class_list.append(terrain_summary["aspect_class"])
+            aspect_class_cn_list.append(terrain_summary["aspect_class_cn"])
+            slope_position_class_list.append(terrain_summary["slope_position_class"])
+            slope_position_class_cn_list.append(terrain_summary["slope_position_class_cn"])
+
+        clipped["elevation_mean_m"] = mean_elev_list
+        clipped["relief_10km_m"] = relief_elev_list
+        clipped["slope_mean_deg"] = mean_slope_list
+        clipped["aspect_mean_deg"] = mean_aspect_deg_list
+        clipped["relative_elevation_norm"] = rel_norm_list
+
+        clipped["landform_type"] = landform_type_list
+        clipped["landform_type_cn"] = landform_type_cn_list
+        clipped["slope_class"] = slope_class_list
+        clipped["slope_class_cn"] = slope_class_cn_list
+        clipped["aspect_class"] = aspect_class_list
+        clipped["aspect_class_cn"] = aspect_class_cn_list
+        clipped["slope_position_class"] = slope_position_class_list
+        clipped["slope_position_class_cn"] = slope_position_class_cn_list
 
     return clipped
 
@@ -246,21 +380,27 @@ def enrich_xiaoban_clip_fields(
 def clip_xiaoban_to_geometry(
     xiaoban_shp: str | Path,
     geom_gdf: gpd.GeoDataFrame,
-    out_shp: str | Path,
+    out_vector: str | Path,
     xiaoban_id_field: str,
     tree_count_field: Optional[str] = None,
     crown_field: Optional[str] = None,
     closure_field: Optional[str] = None,
     area_ha_field: Optional[str] = None,
     density_field: Optional[str] = None,
+    dem_tif: Optional[str] = None,
+    slope_tif: Optional[str] = None,
+    aspect_tif: Optional[str] = None,
+    flat_slope_threshold_deg: float = 5.0,
+    plain_relief_threshold_m: float = 30.0,
 ) -> str:
     xgdf = gpd.read_file(xiaoban_shp)
     if xgdf.crs is None:
-        raise ValueError(f"Xiaoban shapefile has no CRS: {xiaoban_shp}")
+        raise ValueError(f"Xiaoban vector has no CRS: {xiaoban_shp}")
 
     geom_in_x = geom_gdf.to_crs(xgdf.crs)
     clipped = gpd.overlay(xgdf, geom_in_x, how="intersection")
     clipped = clipped[clipped.geometry.notnull() & (~clipped.geometry.is_empty)].copy()
+
     if clipped.empty:
         raise ValueError(f"Clipped xiaoban is empty: {xiaoban_shp}")
 
@@ -273,11 +413,16 @@ def clip_xiaoban_to_geometry(
         closure_field=closure_field,
         area_ha_field=area_ha_field,
         density_field=density_field,
+        dem_tif=dem_tif,
+        slope_tif=slope_tif,
+        aspect_tif=aspect_tif,
+        terrain_rule_cfg=TerrainRuleConfig(
+            flat_slope_threshold_deg=flat_slope_threshold_deg,
+            plain_relief_threshold_m=plain_relief_threshold_m,
+        ),
     )
 
-    ensure_parent(out_shp)
-    clipped.to_file(out_shp)
-    return str(out_shp)
+    return write_vector_auto(clipped, out_vector, layer=Path(out_vector).stem)
 
 
 def prepare_spatial_context(
@@ -292,6 +437,8 @@ def prepare_spatial_context(
     area_ha_field: Optional[str] = None,
     density_field: Optional[str] = None,
     all_touched: bool = False,
+    flat_slope_threshold_deg: float = 5.0,
+    plain_relief_threshold_m: float = 30.0,
 ) -> Dict[str, Any]:
     out_dir = Path(out_dir)
     ensure_dir(out_dir)
@@ -307,13 +454,25 @@ def prepare_spatial_context(
         "dem_tif": None,
         "slope_tif": None,
         "aspect_tif": None,
+        "landform_tif": None,
+        "slope_position_tif": None,
         "xiaoban_shp": None,
+        "xiaoban_vector": None,
+        "terrain_constraint_fields": {
+            "landform_type": "landform_type",
+            "slope_class": "slope_class",
+            "aspect_class": "aspect_class",
+            "slope_position_class": "slope_position_class",
+        },
     }
 
     if dem_tif:
         dem_clip = out_dir / "context_dem.tif"
         slope_clip = out_dir / "context_slope.tif"
         aspect_clip = out_dir / "context_aspect.tif"
+        landform_clip = out_dir / "context_landform.tif"
+        slope_position_clip = out_dir / "context_slope_position.tif"
+        terrain_summary_json = out_dir / "terrain_products_summary.json"
 
         crop_raster_to_geometry(
             src_raster=dem_tif,
@@ -326,30 +485,45 @@ def prepare_spatial_context(
             dem_tif=str(dem_clip),
             slope_tif=str(slope_clip),
             aspect_tif=str(aspect_clip),
+            landform_tif=str(landform_clip),
+            slope_position_tif=str(slope_position_clip),
+            terrain_summary_json=str(terrain_summary_json),
             z_factor=1.0,
+            flat_slope_threshold_deg=flat_slope_threshold_deg,
+            plain_relief_threshold_m=plain_relief_threshold_m,
         )
 
         result["dem_tif"] = str(dem_clip)
         result["slope_tif"] = str(slope_clip)
         result["aspect_tif"] = str(aspect_clip)
+        result["landform_tif"] = str(landform_clip)
+        result["slope_position_tif"] = str(slope_position_clip)
+        result["terrain_summary_json"] = str(terrain_summary_json)
 
     if xiaoban_shp:
         if not xiaoban_id_field:
             raise ValueError("xiaoban_id_field is required when xiaoban_shp is provided.")
 
-        xiaoban_clip = out_dir / "context_xiaoban.shp"
+        xiaoban_clip = out_dir / "context_xiaoban.gpkg"
+
         clip_xiaoban_to_geometry(
             xiaoban_shp=xiaoban_shp,
             geom_gdf=dom_bounds_gdf,
-            out_shp=xiaoban_clip,
+            out_vector=xiaoban_clip,
             xiaoban_id_field=xiaoban_id_field,
             tree_count_field=tree_count_field,
             crown_field=crown_field,
             closure_field=closure_field,
             area_ha_field=area_ha_field,
             density_field=density_field,
+            dem_tif=result["dem_tif"],
+            slope_tif=result["slope_tif"],
+            aspect_tif=result["aspect_tif"],
+            flat_slope_threshold_deg=flat_slope_threshold_deg,
+            plain_relief_threshold_m=plain_relief_threshold_m,
         )
         result["xiaoban_shp"] = str(xiaoban_clip)
+        result["xiaoban_vector"] = str(xiaoban_clip)
 
     summary_json = out_dir / "spatial_context_summary.json"
     with open(summary_json, "w", encoding="utf-8") as f:
@@ -365,15 +539,15 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--dem_tif", default=None)
     parser.add_argument("--xiaoban_shp", default=None)
     parser.add_argument("--out_dir", required=True)
-
     parser.add_argument("--xiaoban_id_field", default=None)
     parser.add_argument("--tree_count_field", default=None)
     parser.add_argument("--crown_field", default=None)
     parser.add_argument("--closure_field", default=None)
     parser.add_argument("--area_ha_field", default=None)
     parser.add_argument("--density_field", default=None)
-
     parser.add_argument("--summary_json", default=None)
+    parser.add_argument("--flat_slope_threshold_deg", type=float, default=5.0)
+    parser.add_argument("--plain_relief_threshold_m", type=float, default=30.0)
     return parser
 
 
@@ -392,6 +566,8 @@ def main():
         closure_field=args.closure_field,
         area_ha_field=args.area_ha_field,
         density_field=args.density_field,
+        flat_slope_threshold_deg=args.flat_slope_threshold_deg,
+        plain_relief_threshold_m=args.plain_relief_threshold_m,
     )
 
     print(json.dumps(result, ensure_ascii=False, indent=2))

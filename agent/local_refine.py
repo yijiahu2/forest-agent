@@ -397,6 +397,8 @@ def build_local_refine_config(
     local_dem_tif: str | None = None,
     local_slope_tif: str | None = None,
     local_aspect_tif: str | None = None,
+    local_landform_tif: str | None = None,
+    local_slope_position_tif: str | None = None,
 ) -> Dict[str, Any]:
     cfg = load_yaml(base_config_path)
 
@@ -411,16 +413,30 @@ def build_local_refine_config(
         cfg["slope_tif"] = local_slope_tif
     if local_aspect_tif:
         cfg["aspect_tif"] = local_aspect_tif
+    if local_landform_tif:
+        cfg["landform_tif"] = local_landform_tif
+    if local_slope_position_tif:
+        cfg["slope_position_tif"] = local_slope_position_tif
+
+    # terrain 规范字段
+    cfg["terrain_landform_field"] = "landform_type"
+    cfg["terrain_slope_class_field"] = "slope_class"
+    cfg["terrain_aspect_class_field"] = "aspect_class"
+    cfg["terrain_slope_position_field"] = "slope_position_class"
+
+    # 规则阈值
+    cfg["flat_slope_threshold_deg"] = cfg.get("flat_slope_threshold_deg", 5.0)
+    cfg["plain_relief_threshold_m"] = cfg.get("plain_relief_threshold_m", 30.0)
 
     cfg["metrics_json"] = str(Path(local_output_dir) / "metrics.json")
     cfg["details_csv"] = str(Path(local_output_dir) / "details.csv")
+
     params = sanitize_params(params)
     for k, v in params.items():
         cfg[k] = v
 
     save_yaml(cfg, out_config_path)
     return cfg
-
 
 # =========================
 # merge
@@ -465,7 +481,6 @@ def merge_global_and_local_instances(
 # =========================
 # merged 评测 + 前后对比
 # =========================
-
 def evaluate_merged_result(
     base_cfg: Dict[str, Any],
     local_root: Path,
@@ -492,10 +507,12 @@ def evaluate_merged_result(
         "--crown_field", base_cfg["crown_field"],
         "--closure_field", base_cfg["closure_field"],
         "--area_ha_field", base_cfg["area_ha_field"],
+        "--flat_slope_threshold_deg", str(base_cfg.get("flat_slope_threshold_deg", 5.0)),
+        "--plain_relief_threshold_m", str(base_cfg.get("plain_relief_threshold_m", 30.0)),
     ]
 
     if base_cfg.get("density_field"):
-        cmd.extend(["--density_field", base_cfg["density_field"]])
+        cmd.extend(["--density_field", str(base_cfg["density_field"])])
 
     if dem_tif:
         cmd.extend(["--dem_tif", dem_tif])
@@ -505,120 +522,34 @@ def evaluate_merged_result(
         cmd.extend(["--aspect_tif", aspect_tif])
 
     res = subprocess.run(cmd, capture_output=True, text=True)
-
-    print("\n===== MERGED EVAL STDOUT =====\n", res.stdout)
-    print("\n===== MERGED EVAL STDERR =====\n", res.stderr)
-
     if res.returncode != 0:
-        raise RuntimeError(f"Merged evaluation failed:\n{res.stderr}")
-
-    if not Path(merged_metrics_json).exists():
-        raise FileNotFoundError(f"merged_metrics.json not found: {merged_metrics_json}")
-    if not Path(merged_details_csv).exists():
-        raise FileNotFoundError(f"merged_details.csv not found: {merged_details_csv}")
-
-    before_metrics = load_json(base_cfg["metrics_json"])
-    after_metrics = load_json(merged_metrics_json)
-
-    before_details = pd.read_csv(base_cfg["details_csv"])
-    after_details = pd.read_csv(merged_details_csv)
-
-    if "xiaoban_id" in before_details.columns:
-        before_details["xiaoban_id"] = before_details["xiaoban_id"].astype(str)
-    if "xiaoban_id" in after_details.columns:
-        after_details["xiaoban_id"] = after_details["xiaoban_id"].astype(str)
-
-    metric_keys = [
-        "tree_count_error_ratio",
-        "mean_crown_width_error_ratio",
-        "closure_error_abs",
-        "density_error_abs",
-    ]
-
-    compare = {
-        "base_metrics_json": base_cfg["metrics_json"],
-        "merged_metrics_json": merged_metrics_json,
-        "base_details_csv": base_cfg["details_csv"],
-        "merged_details_csv": merged_details_csv,
-        "bad_xiaoban_ids": [str(x) for x in bad_ids],
-        "group_plan": group_plan,
-        "global_before_after": {},
-        "bad_xiaoban_before_after": [],
-    }
-
-    for k in metric_keys:
-        bv = before_metrics.get(k)
-        av = after_metrics.get(k)
-        compare["global_before_after"][k] = {
-            "before": bv,
-            "after": av,
-            "delta": (av - bv) if (bv is not None and av is not None) else None,
-        }
-
-    # terrain 关键字段一并记录
-    terrain_metric_keys = [
-        "patch_mean_elev",
-        "patch_relief_elev",
-        "patch_mean_slope",
-        "patch_mean_aspect_deg",
-        "patch_dominant_aspect_class",
-    ]
-    for k in terrain_metric_keys:
-        if k in before_metrics or k in after_metrics:
-            compare["global_before_after"][k] = {
-                "before": before_metrics.get(k),
-                "after": after_metrics.get(k),
-                "delta": (
-                    after_metrics.get(k) - before_metrics.get(k)
-                    if isinstance(before_metrics.get(k), (int, float))
-                    and isinstance(after_metrics.get(k), (int, float))
-                    else None
-                ),
-            }
-
-    if "xiaoban_id" in before_details.columns and "xiaoban_id" in after_details.columns:
-        merged_bad = before_details.merge(
-            after_details,
-            on="xiaoban_id",
-            suffixes=("_before", "_after"),
-        )
-        merged_bad = merged_bad[merged_bad["xiaoban_id"].isin([str(x) for x in bad_ids])].copy()
-
-        for _, row in merged_bad.iterrows():
-            rec = {
-                "xiaoban_id": row["xiaoban_id"],
-                "tree_count_error_abs_before": row.get("tree_count_error_abs_before"),
-                "tree_count_error_abs_after": row.get("tree_count_error_abs_after"),
-                "mean_crown_width_error_abs_before": row.get("mean_crown_width_error_abs_before"),
-                "mean_crown_width_error_abs_after": row.get("mean_crown_width_error_abs_after"),
-                "closure_error_abs_before": row.get("closure_error_abs_before"),
-                "closure_error_abs_after": row.get("closure_error_abs_after"),
-                "density_error_abs_before": row.get("density_error_abs_before"),
-                "density_error_abs_after": row.get("density_error_abs_after"),
-            }
-
-            # terrain 字段保留，便于后续分析
-            for col in [
-                "mean_elev_before", "mean_elev_after",
-                "relief_elev_before", "relief_elev_after",
-                "mean_slope_before", "mean_slope_after",
-                "mean_aspect_deg_before", "mean_aspect_deg_after",
-                "dominant_aspect_class_before", "dominant_aspect_class_after",
-            ]:
-                if col in row.index:
-                    rec[col] = row.get(col)
-
-            compare["bad_xiaoban_before_after"].append(rec)
+        raise RuntimeError(f"merged evaluation failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}")
 
     compare_json = str(local_root / "refine_compare_summary.json")
-    save_json(compare, compare_json)
+    compare_cmd = [
+        "python",
+        "/home/xth/forest_agent_project/scripts/evaluate_local_refine_result.py",
+        "--base_metrics_json", base_cfg["metrics_json"],
+        "--base_details_csv", base_cfg["details_csv"],
+        "--merged_metrics_json", merged_metrics_json,
+        "--merged_details_csv", merged_details_csv,
+        "--out_json", compare_json,
+    ]
+    res2 = subprocess.run(compare_cmd, capture_output=True, text=True)
+    if res2.returncode != 0:
+        raise RuntimeError(f"compare failed:\nSTDOUT:\n{res2.stdout}\nSTDERR:\n{res2.stderr}")
 
     return {
         "merged_metrics_json": merged_metrics_json,
         "merged_details_csv": merged_details_csv,
         "compare_json": compare_json,
+        "bad_ids": bad_ids,
+        "group_plan": group_plan,
+        "terrain_rule_config": {
+            "flat_slope_threshold_deg": base_cfg.get("flat_slope_threshold_deg", 5.0),
+            "plain_relief_threshold_m": base_cfg.get("plain_relief_threshold_m", 30.0),
+        },
     }
-
 
 # =========================
 # 局部参数选择策略增强版
@@ -966,7 +897,7 @@ def run_one_group_refinement(
     )
 
     local_image = str(group_root / "roi_image.tif")
-    local_xiaoban = str(group_root / "roi_xiaoban.shp")
+    local_xiaoban = str(group_root / "roi_xiaoban.gpkg")
     local_config = str(Path("/home/xth/forest_agent_project/configs/generated") / f"{group_name}.yaml")
     local_output_dir = str(group_root / "seg_output")
 
@@ -1000,9 +931,11 @@ def run_one_group_refinement(
         local_xiaoban_shp=local_xiaoban,
         params=params,
         run_name=group_name,
-        local_dem_tif=terrain_roi_outputs.get("roi_dem_tif"),
-        local_slope_tif=terrain_roi_outputs.get("roi_slope_tif"),
-        local_aspect_tif=terrain_roi_outputs.get("roi_aspect_tif"),
+        local_dem_tif=terrain_roi_outputs.get("dem_tif"),
+        local_slope_tif=terrain_roi_outputs.get("slope_tif"),
+        local_aspect_tif=terrain_roi_outputs.get("aspect_tif"),
+        local_landform_tif=terrain_roi_outputs.get("landform_tif"),
+        local_slope_position_tif=terrain_roi_outputs.get("slope_position_tif"),
     )
 
     cmd = [
