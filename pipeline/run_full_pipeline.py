@@ -141,18 +141,35 @@ def assert_dir(path_str: Optional[str], name: str):
         raise NotADirectoryError(f"{name} is not a directory: {p}")
 
 
-def assert_shapefile_complete(shp_path: Optional[str], name: str = "xiaoban_shp"):
-    assert_file(shp_path, name)
-    shp = Path(shp_path)
-    stem = shp.with_suffix("")
-    required = [
-        stem.with_suffix(".shp"),
-        stem.with_suffix(".dbf"),
-        stem.with_suffix(".shx"),
-    ]
-    missing = [str(p) for p in required if not p.exists()]
-    if missing:
-        raise FileNotFoundError(f"{name} incomplete, missing sidecar files: {missing}")
+def assert_vector_input_complete(vector_path: Optional[str], name: str = "xiaoban_shp"):
+    """
+    兼容多种矢量格式：
+    - .shp: 要求 .shp/.dbf/.shx sidecar 完整
+    - .gpkg/.geojson/.json/.fgb: 只要求文件存在
+    """
+    assert_file(vector_path, name)
+    vec = Path(vector_path)
+    suffix = vec.suffix.lower()
+
+    if suffix == ".shp":
+        stem = vec.with_suffix("")
+        required = [
+            stem.with_suffix(".shp"),
+            stem.with_suffix(".dbf"),
+            stem.with_suffix(".shx"),
+        ]
+        missing = [str(p) for p in required if not p.exists()]
+        if missing:
+            raise FileNotFoundError(f"{name} incomplete, missing sidecar files: {missing}")
+        return
+
+    if suffix in {".gpkg", ".geojson", ".json", ".fgb"}:
+        return
+
+    raise ValueError(
+        f"Unsupported vector format for {name}: {vec}. "
+        "Please provide .shp/.gpkg/.geojson/.json/.fgb"
+    )
 
 
 def assert_env_var(name: str):
@@ -172,7 +189,7 @@ def run_precheck(
     assert_file(runtime_base_config, "runtime_base_config")
 
     assert_file(cfg.get("input_image"), "input_image")
-    assert_shapefile_complete(cfg.get("xiaoban_shp"), "xiaoban_shp")
+    assert_vector_input_complete(cfg.get("xiaoban_shp"), "xiaoban_shp")
 
     if cfg.get("dem_tif"):
         assert_file(cfg.get("dem_tif"), "dem_tif")
