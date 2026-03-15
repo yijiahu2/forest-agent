@@ -358,10 +358,15 @@ def run_evaluation(cfg: Dict[str, Any], inst_shp: str, terrain_info: Dict[str, A
     require_file(eval_paths["metrics_json"], "Evaluation metrics_json")
     require_file(eval_paths["details_csv"], "Evaluation details_csv")
 
+    metrics = load_json(eval_paths["metrics_json"])
+    if not isinstance(metrics, dict) or not metrics:
+        raise ValueError(f"Evaluation metrics json is empty or invalid: {eval_paths['metrics_json']}")
+
     return {
         "cmd": cmd,
         "metrics_json": eval_paths["metrics_json"],
         "details_csv": eval_paths["details_csv"],
+        "metrics": metrics,
         "terrain_info": terrain_info,
         "terrain_rule_config": {
             "flat_slope_threshold_deg": cfg.get("flat_slope_threshold_deg", 5.0),
