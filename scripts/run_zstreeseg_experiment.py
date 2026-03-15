@@ -352,8 +352,8 @@ def run_evaluation(cfg: Dict[str, Any], inst_shp: str, terrain_info: Dict[str, A
     ])
 
     res = run_cmd(cmd)
-    if res["returncode"] != 0:
-        raise RuntimeError(f"Evaluation failed:\n{res['stderr']}")
+    if res.returncode != 0:
+        raise RuntimeError(f"Evaluation failed:\n{res.stderr}")
 
     require_file(eval_paths["metrics_json"], "Evaluation metrics_json")
     require_file(eval_paths["details_csv"], "Evaluation details_csv")
