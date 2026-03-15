@@ -29,3 +29,14 @@ def maybe_load_hint_params(path: Optional[str]) -> Optional[Dict[str, Any]]:
             return data[key]
 
     return None
+
+def maybe_load_spatial_context(path: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not path:
+        return None
+    p = Path(path)
+    if not p.exists():
+        return None
+    data = load_json(str(p))
+    if isinstance(data, dict):
+        return data
+    return None

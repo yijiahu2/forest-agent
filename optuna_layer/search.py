@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 
 import optuna
 
-from optuna_layer.io_utils import maybe_load_hint_params, save_json
+from optuna_layer.io_utils import maybe_load_hint_params, maybe_load_spatial_context, save_json
 from optuna_layer.objective import make_objective
 from optuna_layer.search_space import build_search_space
 
@@ -51,13 +51,15 @@ def main():
     parser.add_argument("--n_trials", type=int, default=2)
     parser.add_argument("--agent_hint_json", default=None)
     parser.add_argument("--out_best_json", default=DEFAULT_OUT_BEST_JSON)
+    parser.add_argument("--spatial_context_json", default=None)
     parser.add_argument("--storage", default=DEFAULT_STORAGE)
     parser.add_argument("--study_name", default=None)
     parser.add_argument("--resume", action="store_true", help="continue an existing study")
     args = parser.parse_args()
 
     hint_params = maybe_load_hint_params(args.agent_hint_json)
-    search_space = build_search_space(hint_params)
+    spatial_context = maybe_load_spatial_context(args.spatial_context_json)
+    search_space = build_search_space(hint_params, spatial_context=spatial_context)
 
     study_name = make_study_name(
         prefix="forest_agent_single",
@@ -74,6 +76,7 @@ def main():
     print(f"[optuna.search] resume={args.resume}")
     print(f"[optuna.search] agent_hint_json={args.agent_hint_json}")
     print(f"[optuna.search] out_best_json={args.out_best_json}")
+    print(f"[optuna.search] spatial_context_json={args.spatial_context_json}")
     print(f"[optuna.search] hint_params={hint_params}")
     print(f"[optuna.search] search_space={search_space}")
 
@@ -104,6 +107,8 @@ def main():
         "n_trials_added": after_trials - before_trials,
         "agent_hint_json": args.agent_hint_json,
         "hint_params": hint_params,
+        "spatial_context_json": args.spatial_context_json,
+        "spatial_context": spatial_context,
         "search_space": search_space,
         "best_params": dict(best.params),
         "best_value": best.value,
