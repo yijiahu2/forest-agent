@@ -266,7 +266,18 @@ def enrich_xiaoban_clip_fields(
     clipped_metric = clipped.to_crs(metric_crs)
     clipped["clip_area_m2"] = clipped_metric.geometry.area.astype(float)
     clipped["clip_area_ha"] = clipped["clip_area_m2"] / 10000.0
-    clipped = clipped.merge(source_area, on=xiaoban_id_field, how="left")
+    clipped = clipped.merge(source_area, on=xiaoban_id_field, how="left", suffixes=("", "_src"))
+
+    # 兼容重复 merge 的场景：若输入 clipped 已包含面积列，merge 后可能出现 *_src 列。
+    if "orig_geom_area_m2" not in clipped.columns and "orig_geom_area_m2_src" in clipped.columns:
+        clipped["orig_geom_area_m2"] = clipped["orig_geom_area_m2_src"]
+    if "inventory_area_m2" not in clipped.columns and "inventory_area_m2_src" in clipped.columns:
+        clipped["inventory_area_m2"] = clipped["inventory_area_m2_src"]
+
+    if "orig_geom_area_m2" not in clipped.columns:
+        raise KeyError("orig_geom_area_m2 missing after xiaoban area merge")
+    if "inventory_area_m2" not in clipped.columns:
+        clipped["inventory_area_m2"] = np.nan
 
     clipped["overlap_ratio_geom"] = clipped["clip_area_m2"] / clipped["orig_geom_area_m2"].replace(0, pd.NA)
     clipped["overlap_ratio_inventory"] = clipped["clip_area_m2"] / clipped["inventory_area_m2"].replace(0, pd.NA)
