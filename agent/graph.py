@@ -242,6 +242,7 @@ def default_prompt_builder(
     latest_metrics: Dict[str, Any],
     bad_xiaoban_summary: Any,
     round_idx: int,
+    spatial_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     return f"""
 你是林业遥感单木分割参数优化助手。
@@ -277,6 +278,7 @@ def default_prompt_builder(
 bad xiaoban 摘要: {json.dumps(bad_xiaoban_summary, ensure_ascii=False)}
 patch_id: {base_cfg.get("patch_id", "")}
 forest_type: {base_cfg.get("forest_type", "")}
+spatial_context: {json.dumps(spatial_context or {}, ensure_ascii=False)}
 """.strip()
 
 
@@ -286,6 +288,7 @@ def build_prompt_compat(
     latest_metrics: Dict[str, Any],
     bad_xiaoban_summary: Any,
     round_idx: int,
+    spatial_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     try:
         fn = try_import_prompt_builder()
@@ -296,6 +299,7 @@ def build_prompt_compat(
                 latest_metrics=latest_metrics,
                 bad_xiaoban_summary=bad_xiaoban_summary,
                 round_idx=round_idx,
+                spatial_context=spatial_context,
             )
         except TypeError:
             # 回退到更简单签名
@@ -311,6 +315,7 @@ def build_prompt_compat(
             latest_metrics=latest_metrics,
             bad_xiaoban_summary=bad_xiaoban_summary,
             round_idx=round_idx,
+            spatial_context=spatial_context,
         )
 
 
@@ -344,6 +349,7 @@ def save_agent_final_summary(
     latest_metrics_json: str = "",
     latest_details_csv: str = "",
     history: Optional[list] = None,
+    spatial_context: Optional[Dict[str, Any]] = None,
     out_json: str = DEFAULT_AGENT_OUT,
 ):
     Path(out_json).parent.mkdir(parents=True, exist_ok=True)
@@ -354,6 +360,7 @@ def save_agent_final_summary(
         "latest_metrics_json": latest_metrics_json,
         "latest_details_csv": latest_details_csv,
         "history": history or [],
+        "spatial_context": spatial_context or {},
     }
     with open(out_json, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -366,6 +373,7 @@ def run_agent_loop(
     agent_out_json: str = DEFAULT_AGENT_OUT,
 ):
     base_cfg = load_yaml(base_config_path)
+    spatial_context = base_cfg.get("spatial_context_object") or {}
 
     current_params = sanitize_params({
         "diam_list": base_cfg.get("diam_list", "96,192,320"),
@@ -391,6 +399,7 @@ def run_agent_loop(
             latest_metrics=best_metrics or {},
             bad_xiaoban_summary=extract_bad_xiaoban_summary(latest_details_csv, top_k=5) if latest_details_csv else [],
             round_idx=round_idx,
+            spatial_context=spatial_context,
         )
 
         raw_resp = try_call_doubao_json(prompt)
@@ -439,6 +448,7 @@ def run_agent_loop(
         latest_metrics_json=latest_metrics_json,
         latest_details_csv=latest_details_csv,
         history=history,
+        spatial_context=spatial_context,
         out_json=agent_out_json,
     )
 

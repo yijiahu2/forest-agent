@@ -19,6 +19,10 @@ BEFORE_KEEP = [
     "mean_slope",
     "relief_elev",
     "dominant_aspect_class",
+    "landform_type",
+    "slope_class",
+    "aspect_class",
+    "slope_position_class",
 ]
 
 AFTER_KEEP = [
@@ -99,6 +103,29 @@ def main() -> None:
     compare_csv = out_dir / "finetune_compare.csv"
     merged.to_csv(compare_csv, index=False)
 
+
+    terrain_group_cols = [
+        c
+        for c in ["landform_type", "slope_class", "aspect_class", "slope_position_class"]
+        if c in merged.columns
+    ]
+    stratified_gain = []
+    if terrain_group_cols:
+        grouped = merged.groupby(terrain_group_cols, dropna=False)
+        for key, sub in grouped:
+            key_tuple = key if isinstance(key, tuple) else (key,)
+            key_dict = {terrain_group_cols[i]: key_tuple[i] for i in range(len(terrain_group_cols))}
+            stratified_gain.append(
+                {
+                    **key_dict,
+                    "num_samples": int(len(sub)),
+                    "mean_gain_tree_count": float(sub["gain_tree_count"].mean()) if "gain_tree_count" in sub.columns else None,
+                    "mean_gain_crown": float(sub["gain_crown"].mean()) if "gain_crown" in sub.columns else None,
+                    "mean_gain_closure": float(sub["gain_closure"].mean()) if "gain_closure" in sub.columns else None,
+                    "mean_gain_density": float(sub["gain_density"].mean()) if "gain_density" in sub.columns else None,
+                }
+            )
+
     summary = {
         "num_compared": int(len(merged)),
         "join_col": JOIN_COL,
@@ -126,6 +153,8 @@ def main() -> None:
         "num_density_improved": int((merged["gain_density"] > 0).sum())
         if "gain_density" in merged.columns
         else None,
+        "terrain_group_cols": terrain_group_cols,
+        "stratified_gain": stratified_gain,
     }
 
     dump_json(summary, out_dir / "finetune_gain_summary.json")
