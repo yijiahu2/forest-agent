@@ -44,7 +44,10 @@ def _nearest_choices(base_choices, center_value, window: int = 1):
     return list(base_choices[lo:hi])
 
 
-def build_search_space(hint_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def build_search_space(
+    hint_params: Optional[Dict[str, Any]] = None,
+    spatial_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     根据 agent hint 缩小搜索空间。
     设计原则：
@@ -101,5 +104,26 @@ def build_search_space(hint_params: Optional[Dict[str, Any]] = None) -> Dict[str
 
     # bsize 强制固定
     space["bsize"] = 256
+
+    return _apply_spatial_context_constraints(space, spatial_context)
+
+def _apply_spatial_context_constraints(space: Dict[str, Any], spatial_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not spatial_context:
+        return space
+
+    terrain_profile = spatial_context.get("dominant_terrain_profile", {})
+    slope_class = terrain_profile.get("dominant_slope_class")
+    landform = terrain_profile.get("dominant_landform")
+
+    if slope_class in {"steep", "very_steep"}:
+        space["tile"] = [min(space["tile"])]
+        space["overlap"] = [max(space["overlap"])]
+        space["tile_overlap"] = [max(space["tile_overlap"])]
+
+    if landform in {"mountain", "hill"}:
+        space["iou_merge_thr"] = [x for x in space["iou_merge_thr"] if x <= 0.24] or space["iou_merge_thr"]
+
+    if slope_class in {"flat", "gentle"} and landform in {"plain", "tableland"}:
+        space["augment"] = [True]
 
     return space

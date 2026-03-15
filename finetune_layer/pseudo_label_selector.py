@@ -10,6 +10,7 @@ from finetune_layer.io_utils import (
     dump_csv,
     dump_json,
     load_csv,
+    load_json,
     load_yaml,
     normalize_details_df,
 )
@@ -55,8 +56,35 @@ def compute_candidate_score(row: pd.Series, weights: dict[str, float]) -> float:
     relief = float(row.get("relief_elev", 0.0) or 0.0)
     score -= min(mean_slope / 45.0, 1.0) * 0.05
     score -= min(relief / 80.0, 1.0) * 0.05
+    score += _terrain_bonus(row)
     return float(score)
 
+
+
+
+def _load_spatial_context(cfg: dict) -> dict:
+    path = cfg.get("spatial_context_object_json")
+    if not path:
+        return {}
+    p = Path(path)
+    if not p.exists():
+        return {}
+    try:
+        data = load_json(p)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _terrain_bonus(row: pd.Series) -> float:
+    bonus = 0.0
+    if str(row.get("slope_class") or "") in {"flat", "gentle"}:
+        bonus += 0.03
+    if str(row.get("landform_type") or "") in {"plain", "tableland"}:
+        bonus += 0.02
+    if str(row.get("slope_position_class") or "") in {"lower", "middle"}:
+        bonus += 0.01
+    return bonus
 
 def build_masks(work: pd.DataFrame, cfg: dict, usable_metrics: list[str]) -> tuple[pd.Series, pd.Series]:
     pseudo_mask = pd.Series(True, index=work.index)
@@ -130,6 +158,9 @@ def main() -> None:
     out_dir = Path(cfg["output_dir"]) / "pseudo_select"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    spatial_context = _load_spatial_context(cfg)
+    terrain_rule_config = spatial_context.get("terrain_rule_config", {}) if isinstance(spatial_context, dict) else {}
+
     raw_df = load_csv(details_csv)
     norm_df, rename_map, missing, debug_info = normalize_details_df(raw_df, cfg)
 
@@ -147,6 +178,11 @@ def main() -> None:
         dump_json(debug_payload, out_dir / "pseudo_select_debug.json")
         raise ValueError(f"details.csv 规范化失败: {missing}")
 
+    if "flat_slope_threshold_deg" in terrain_rule_config:
+        cfg["max_mean_slope_for_easy"] = min(
+            float(cfg.get("max_mean_slope_for_easy", 28.0)),
+            float(terrain_rule_config.get("flat_slope_threshold_deg", 5.0)) + 20.0,
+        )
     pseudo_df, hard_df, good_df, meta = split_candidates(norm_df, cfg)
 
     max_pseudo = int(cfg.get("max_pseudo_rois", 80))
@@ -168,6 +204,8 @@ def main() -> None:
         "normalized_columns": norm_df.columns.tolist(),
         "usable_metrics": meta["usable_metrics"],
         "metric_weights": meta["metric_weights"],
+        "spatial_context_object_json": cfg.get("spatial_context_object_json"),
+        "terrain_rule_config": terrain_rule_config,
         "outputs": {
             "normalized_details_csv": str(out_dir / "normalized_details.csv"),
             "pseudo_candidates_csv": str(out_dir / "pseudo_candidates.csv"),

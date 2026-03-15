@@ -179,6 +179,16 @@ def _masked_values_from_geom(raster_path: str, geom_gdf: gpd.GeoDataFrame) -> np
         return vals
 
 
+
+
+def _coalesce_numeric_column(df: pd.DataFrame, target: str, candidates: list[str]) -> None:
+    if target in df.columns:
+        return
+    for c in candidates:
+        if c in df.columns:
+            df[target] = pd.to_numeric(df[c], errors="coerce")
+            return
+
 def raster_stats_for_geom(raster_path: str, geom_gdf: gpd.GeoDataFrame) -> Dict[str, Optional[float]]:
     vals = _masked_values_from_geom(raster_path, geom_gdf)
     if len(vals) == 0:
@@ -266,7 +276,38 @@ def enrich_xiaoban_clip_fields(
     clipped_metric = clipped.to_crs(metric_crs)
     clipped["clip_area_m2"] = clipped_metric.geometry.area.astype(float)
     clipped["clip_area_ha"] = clipped["clip_area_m2"] / 10000.0
-    clipped = clipped.merge(source_area, on=xiaoban_id_field, how="left")
+    clipped = clipped.merge(source_area, on=xiaoban_id_field, how="left", suffixes=("", "_src"))
+
+    # 兼容不同 overlay/merge 产物列名（*_src/*_x/*_y 等）。
+    _coalesce_numeric_column(
+        clipped,
+        "orig_geom_area_m2",
+        [
+            "orig_geom_area_m2_src",
+            "orig_geom_area_m2_x",
+            "orig_geom_area_m2_y",
+            "xiaoban_area_m2",
+            "source_area_m2",
+        ],
+    )
+    _coalesce_numeric_column(
+        clipped,
+        "inventory_area_m2",
+        [
+            "inventory_area_m2_src",
+            "inventory_area_m2_x",
+            "inventory_area_m2_y",
+            "area_inventory_m2",
+        ],
+    )
+
+    if "orig_geom_area_m2" not in clipped.columns:
+        raise KeyError(
+            "orig_geom_area_m2 missing after xiaoban area merge. "
+            f"available columns={list(clipped.columns)}"
+        )
+    if "inventory_area_m2" not in clipped.columns:
+        clipped["inventory_area_m2"] = np.nan
 
     clipped["overlap_ratio_geom"] = clipped["clip_area_m2"] / clipped["orig_geom_area_m2"].replace(0, pd.NA)
     clipped["overlap_ratio_inventory"] = clipped["clip_area_m2"] / clipped["inventory_area_m2"].replace(0, pd.NA)

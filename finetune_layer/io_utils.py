@@ -132,6 +132,22 @@ COLUMN_CANDIDATES = {
         "aspect_class",
         "main_aspect_class",
     ],
+    "landform_type": [
+        "landform_type",
+        "terrain_landform_type",
+    ],
+    "slope_class": [
+        "slope_class",
+        "terrain_slope_class",
+    ],
+    "aspect_class": [
+        "aspect_class",
+        "terrain_aspect_class",
+    ],
+    "slope_position_class": [
+        "slope_position_class",
+        "terrain_slope_position_class",
+    ],
 }
 
 PRED_TREE_CANDIDATES = [
@@ -245,6 +261,14 @@ def normalize_details_df(
         df["relief_elev"] = 0.0
     if "dominant_aspect_class" not in df.columns:
         df["dominant_aspect_class"] = None
+    if "landform_type" not in df.columns:
+        df["landform_type"] = None
+    if "slope_class" not in df.columns:
+        df["slope_class"] = None
+    if "aspect_class" not in df.columns:
+        df["aspect_class"] = None
+    if "slope_position_class" not in df.columns:
+        df["slope_position_class"] = None
 
     # 5) 最低要求：XBH + 至少一个误差列
     error_cols = [

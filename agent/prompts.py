@@ -8,6 +8,7 @@ def build_proposal_prompt(
     details_summary: dict,
     iteration: int,
     max_iterations: int,
+    spatial_context: dict | None = None,
 ) -> str:
     return f"""
 你是森林单木分割参数优化智能体。
@@ -27,6 +28,9 @@ def build_proposal_prompt(
 
 当前 patch 内误差最大的若干小班摘要：
 {json.dumps(details_summary, ensure_ascii=False, indent=2)}
+
+空间上下文（第四层统一对象）：
+{json.dumps(spatial_context or {}, ensure_ascii=False, indent=2)}
 
 历史较优实验：
 {json.dumps(best_history, ensure_ascii=False, indent=2)}
