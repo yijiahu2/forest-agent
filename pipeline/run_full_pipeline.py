@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from agent.config_builder import load_yaml
 from agent.local_refine import run_local_refinement
+from geo_layer.context_object import build_spatial_context_object_from_config
 from geo_layer.spatial_context import prepare_spatial_context
 
 
@@ -140,18 +141,35 @@ def assert_dir(path_str: Optional[str], name: str):
         raise NotADirectoryError(f"{name} is not a directory: {p}")
 
 
-def assert_shapefile_complete(shp_path: Optional[str], name: str = "xiaoban_shp"):
-    assert_file(shp_path, name)
-    shp = Path(shp_path)
-    stem = shp.with_suffix("")
-    required = [
-        stem.with_suffix(".shp"),
-        stem.with_suffix(".dbf"),
-        stem.with_suffix(".shx"),
-    ]
-    missing = [str(p) for p in required if not p.exists()]
-    if missing:
-        raise FileNotFoundError(f"{name} incomplete, missing sidecar files: {missing}")
+def assert_vector_input_complete(vector_path: Optional[str], name: str = "xiaoban_shp"):
+    """
+    兼容多种矢量格式：
+    - .shp: 要求 .shp/.dbf/.shx sidecar 完整
+    - .gpkg/.geojson/.json/.fgb: 只要求文件存在
+    """
+    assert_file(vector_path, name)
+    vec = Path(vector_path)
+    suffix = vec.suffix.lower()
+
+    if suffix == ".shp":
+        stem = vec.with_suffix("")
+        required = [
+            stem.with_suffix(".shp"),
+            stem.with_suffix(".dbf"),
+            stem.with_suffix(".shx"),
+        ]
+        missing = [str(p) for p in required if not p.exists()]
+        if missing:
+            raise FileNotFoundError(f"{name} incomplete, missing sidecar files: {missing}")
+        return
+
+    if suffix in {".gpkg", ".geojson", ".json", ".fgb"}:
+        return
+
+    raise ValueError(
+        f"Unsupported vector format for {name}: {vec}. "
+        "Please provide .shp/.gpkg/.geojson/.json/.fgb"
+    )
 
 
 def assert_env_var(name: str):
@@ -171,7 +189,7 @@ def run_precheck(
     assert_file(runtime_base_config, "runtime_base_config")
 
     assert_file(cfg.get("input_image"), "input_image")
-    assert_shapefile_complete(cfg.get("xiaoban_shp"), "xiaoban_shp")
+    assert_vector_input_complete(cfg.get("xiaoban_shp"), "xiaoban_shp")
 
     if cfg.get("dem_tif"):
         assert_file(cfg.get("dem_tif"), "dem_tif")
@@ -329,6 +347,24 @@ def maybe_prepare_spatial_context_runtime_config(
     return str(temp_cfg)
 
 
+def sync_spatial_context_to_config(
+    runtime_base_config: str,
+    pipeline_root: Path,
+) -> tuple[str, Dict[str, Any]]:
+    cfg = load_yaml(runtime_base_config)
+    context_obj = build_spatial_context_object_from_config(cfg)
+
+    cfg["spatial_context_object"] = context_obj
+
+    context_json = pipeline_root / "spatial_context_object.json"
+    save_json(context_obj, context_json)
+    cfg["spatial_context_object_json"] = str(context_json)
+
+    temp_cfg = pipeline_root / "runtime_base_config.yaml"
+    save_yaml(cfg, temp_cfg)
+    return str(temp_cfg), context_obj
+
+
 def resolve_runtime_base_config(
     *,
     args: argparse.Namespace,
@@ -435,6 +471,7 @@ def run_optuna_single_stage(
     base_config_path: str,
     n_trials: int = 2,
     agent_hint_json: Optional[str] = None,
+    spatial_context_json: Optional[str] = None,
     out_best_json: str = "/home/xth/forest_agent_project/outputs/optuna/optuna_single_best.json",
     study_name: Optional[str] = None,
     storage: Optional[str] = None,
@@ -454,6 +491,8 @@ def run_optuna_single_stage(
 
     if agent_hint_json:
         cmd.extend(["--agent_hint_json", agent_hint_json])
+    if spatial_context_json:
+        cmd.extend(["--spatial_context_json", spatial_context_json])
     if study_name:
         cmd.extend(["--study_name", study_name])
     if storage:
@@ -482,6 +521,7 @@ def run_optuna_multi_stage(
     base_config_path: str,
     n_trials: int = 2,
     agent_hint_json: Optional[str] = None,
+    spatial_context_json: Optional[str] = None,
     out_best_json: str = "/home/xth/forest_agent_project/outputs/optuna/optuna_multi_best.json",
     study_name: Optional[str] = None,
     storage: Optional[str] = None,
@@ -501,6 +541,8 @@ def run_optuna_multi_stage(
 
     if agent_hint_json:
         cmd.extend(["--agent_hint_json", agent_hint_json])
+    if spatial_context_json:
+        cmd.extend(["--spatial_context_json", spatial_context_json])
     if study_name:
         cmd.extend(["--study_name", study_name])
     if storage:
@@ -910,6 +952,10 @@ def main():
         args=args,
         pipeline_root=pipeline_root,
     )
+    runtime_base_config, spatial_context_object = sync_spatial_context_to_config(
+        runtime_base_config=runtime_base_config,
+        pipeline_root=pipeline_root,
+    )
 
     base_cfg = load_yaml(runtime_base_config)
 
@@ -932,15 +978,13 @@ def main():
             "run_local_refine": args.run_local_refine,
             "run_finetune": args.run_finetune,
         },
-        "terrain_inputs": {
-            "dem_tif": base_cfg.get("dem_tif"),
-            "slope_tif": base_cfg.get("slope_tif"),
-            "aspect_tif": base_cfg.get("aspect_tif"),
-        },
+        "terrain_inputs": spatial_context_object.get("terrain_inputs", {}),
         "spatial_context": {
-            "enabled": args.auto_spatial_context,
-            "summary_json": base_cfg.get("spatial_context_summary_json"),
+            "enabled": spatial_context_object.get("spatial_context_enabled", False),
+            "summary_json": spatial_context_object.get("spatial_context_summary_json"),
         },
+        "spatial_context_object_json": base_cfg.get("spatial_context_object_json"),
+        "spatial_context_object": spatial_context_object,
         "control": {
             "resume": args.resume,
             "run_dir": args.run_dir,
@@ -1005,6 +1049,7 @@ def main():
                 "agent_summary_json": current_agent_summary_json,
                 "optuna_best_json": current_optuna_best_json,
                 "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
+                "spatial_context_object_json": base_cfg.get("spatial_context_object_json"),
             }
             save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
             return
@@ -1045,6 +1090,7 @@ def main():
                 "agent_summary_json": current_agent_summary_json,
                 "optuna_best_json": current_optuna_best_json,
                 "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
+                "spatial_context_object_json": base_cfg.get("spatial_context_object_json"),
             }
             save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
             return
@@ -1082,6 +1128,7 @@ def main():
                 "agent_summary_json": current_agent_summary_json,
                 "optuna_best_json": current_optuna_best_json,
                 "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
+                "spatial_context_object_json": base_cfg.get("spatial_context_object_json"),
             }
             save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
             return
@@ -1098,6 +1145,7 @@ def main():
                 base_config_path=runtime_base_config,
                 n_trials=args.n_trials_single,
                 agent_hint_json=current_agent_summary_json,
+                spatial_context_json=base_cfg.get("spatial_context_object_json"),
                 study_name=args.optuna_study_name,
                 storage=args.optuna_storage,
                 resume=args.optuna_resume,
@@ -1123,6 +1171,7 @@ def main():
                 "agent_summary_json": current_agent_summary_json,
                 "optuna_best_json": current_optuna_best_json,
                 "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
+                "spatial_context_object_json": base_cfg.get("spatial_context_object_json"),
             }
             save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
             return
@@ -1139,6 +1188,7 @@ def main():
                 base_config_path=runtime_base_config,
                 n_trials=args.n_trials_multi,
                 agent_hint_json=current_agent_summary_json,
+                spatial_context_json=base_cfg.get("spatial_context_object_json"),
                 study_name=args.optuna_study_name,
                 storage=args.optuna_storage,
                 resume=args.optuna_resume,
@@ -1164,6 +1214,7 @@ def main():
                 "agent_summary_json": current_agent_summary_json,
                 "optuna_best_json": current_optuna_best_json,
                 "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
+                "spatial_context_object_json": base_cfg.get("spatial_context_object_json"),
             }
             save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
             return
@@ -1232,6 +1283,7 @@ def main():
                 "agent_summary_json": current_agent_summary_json,
                 "optuna_best_json": current_optuna_best_json,
                 "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
+                "spatial_context_object_json": base_cfg.get("spatial_context_object_json"),
             }
             save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
             return
@@ -1243,6 +1295,7 @@ def main():
 
             finetune_cfg = load_yaml(args.finetune_config)
             finetune_cfg["pipeline_run_dir"] = str(pipeline_root)
+            finetune_cfg["spatial_context_object_json"] = base_cfg.get("spatial_context_object_json")
 
             runtime_finetune_config = pipeline_root / "runtime_finetune_config.yaml"
             save_yaml(finetune_cfg, runtime_finetune_config)
@@ -1305,6 +1358,7 @@ def main():
                 "agent_summary_json": current_agent_summary_json,
                 "optuna_best_json": current_optuna_best_json,
                 "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
+                "spatial_context_object_json": base_cfg.get("spatial_context_object_json"),
             }
             finetune_prev = stage_outputs_or_none(state, "finetune")
             if finetune_prev:
@@ -1324,6 +1378,7 @@ def main():
             "agent_summary_json": current_agent_summary_json,
             "optuna_best_json": current_optuna_best_json,
             "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
+                "spatial_context_object_json": base_cfg.get("spatial_context_object_json"),
         }
         summary["pipeline_state_json"] = str(pipeline_root / "pipeline_state.json")
         save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
@@ -1337,6 +1392,7 @@ def main():
         "agent_summary_json": current_agent_summary_json,
         "optuna_best_json": current_optuna_best_json,
         "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
+                "spatial_context_object_json": base_cfg.get("spatial_context_object_json"),
     }
     summary["pipeline_state_json"] = str(pipeline_root / "pipeline_state.json")
     save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)

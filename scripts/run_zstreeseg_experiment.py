@@ -85,6 +85,8 @@ def prepare_terrain_inputs_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "dem_tif": dem_tif,
         "slope_tif": slope_tif,
         "aspect_tif": aspect_tif,
+        "landform_tif": cfg.get("landform_tif"),
+        "slope_position_tif": cfg.get("slope_position_tif"),
         "terrain_generated": False,
     }
 
@@ -174,6 +176,13 @@ def collect_run_metadata(cfg: Dict[str, Any], terrain_info: Dict[str, Any]) -> D
     ]
     meta = {k: cfg.get(k) for k in keys if k in cfg}
     meta["terrain_info"] = terrain_info
+    meta["spatial_context_object_json"] = cfg.get("spatial_context_object_json")
+    meta["terrain_constraint_fields"] = {
+        "terrain_landform_field": cfg.get("terrain_landform_field", "landform_type"),
+        "terrain_slope_class_field": cfg.get("terrain_slope_class_field", "slope_class"),
+        "terrain_aspect_class_field": cfg.get("terrain_aspect_class_field", "aspect_class"),
+        "terrain_slope_position_field": cfg.get("terrain_slope_position_field", "slope_position_class"),
+    }
     return meta
 
 
@@ -343,16 +352,21 @@ def run_evaluation(cfg: Dict[str, Any], inst_shp: str, terrain_info: Dict[str, A
     ])
 
     res = run_cmd(cmd)
-    if res["returncode"] != 0:
-        raise RuntimeError(f"Evaluation failed:\n{res['stderr']}")
+    if res.returncode != 0:
+        raise RuntimeError(f"Evaluation failed:\n{res.stderr}")
 
     require_file(eval_paths["metrics_json"], "Evaluation metrics_json")
     require_file(eval_paths["details_csv"], "Evaluation details_csv")
+
+    metrics = load_json(eval_paths["metrics_json"])
+    if not isinstance(metrics, dict) or not metrics:
+        raise ValueError(f"Evaluation metrics json is empty or invalid: {eval_paths['metrics_json']}")
 
     return {
         "cmd": cmd,
         "metrics_json": eval_paths["metrics_json"],
         "details_csv": eval_paths["details_csv"],
+        "metrics": metrics,
         "terrain_info": terrain_info,
         "terrain_rule_config": {
             "flat_slope_threshold_deg": cfg.get("flat_slope_threshold_deg", 5.0),
