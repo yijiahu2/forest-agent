@@ -10,6 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.config_builder import load_yaml, save_yaml  # noqa: E402
+from tools.process_runner import run_streaming  # noqa: E402
 
 
 DEFAULT_RUNNER = "/home/xth/forest_agent_project/scripts/run_zstreeseg_experiment.py"
@@ -89,10 +90,10 @@ def run_trial_experiment(config_path: str) -> Dict[str, Any]:
         "--config",
         config_path,
     ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    res = run_streaming(cmd)
 
     if res.returncode != 0:
-        raise RuntimeError(f"Trial failed:\n{res.stderr}")
+        raise RuntimeError(f"Trial failed:\n{res.stdout}")
 
     cfg = load_yaml(config_path)
     metrics_json = cfg["metrics_json"]

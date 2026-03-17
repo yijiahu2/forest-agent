@@ -18,6 +18,7 @@ from agent.config_builder import load_yaml
 from agent.local_refine import run_local_refinement
 from geo_layer.context_object import build_spatial_context_object_from_config
 from geo_layer.spatial_context import prepare_spatial_context
+from tools.process_runner import run_streaming
 
 
 # =========================
@@ -53,13 +54,7 @@ def save_yaml(obj: Dict[str, Any], path: str | Path):
 
 
 def run_subprocess(cmd, cwd: Optional[str] = None) -> Dict[str, Any]:
-    res = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
-    print("\n===== CMD =====")
-    print(" ".join(cmd))
-    print("\n===== STDOUT =====")
-    print(res.stdout)
-    print("\n===== STDERR =====")
-    print(res.stderr)
+    res = run_streaming(cmd, cwd=cwd)
 
     return {
         "cmd": cmd,
@@ -1294,6 +1289,47 @@ def main():
                 raise ValueError("run_finetune requires --finetune_config")
 
             finetune_cfg = load_yaml(args.finetune_config)
+            latest_local_refine = local_refine_info or stage_outputs_or_none(state, "local_refine") or {}
+
+            # 将 finetune 输入显式对齐到当前 pipeline 里最新可用的上游产物，
+            # 避免继续读取 finetune 模板里写死的历史 local_refine 路径。
+            finetune_cfg["metrics_json"] = (
+                latest_local_refine.get("merged_metrics_json")
+                or current_global_metrics_json
+                or finetune_cfg.get("metrics_json")
+            )
+            finetune_cfg["details_csv"] = (
+                latest_local_refine.get("merged_details_csv")
+                or current_global_details_csv
+                or finetune_cfg.get("details_csv")
+            )
+            finetune_cfg["pseudo_inst_shp"] = (
+                latest_local_refine.get("merged_shp")
+                or current_global_inst_shp
+                or finetune_cfg.get("pseudo_inst_shp")
+            )
+
+            # 几何/地形输入也对齐 runtime base config，保证与本次 pipeline 的 spatial context 一致。
+            for key in [
+                "input_image",
+                "xiaoban_shp",
+                "xiaoban_id_field",
+                "tree_count_field",
+                "crown_field",
+                "closure_field",
+                "area_ha_field",
+                "density_field",
+                "dem_tif",
+                "slope_tif",
+                "aspect_tif",
+                "landform_tif",
+                "slope_position_tif",
+                "flat_slope_threshold_deg",
+                "plain_relief_threshold_m",
+            ]:
+                if key in base_cfg:
+                    finetune_cfg[key] = base_cfg.get(key)
+
             finetune_cfg["pipeline_run_dir"] = str(pipeline_root)
             finetune_cfg["spatial_context_object_json"] = base_cfg.get("spatial_context_object_json")
 

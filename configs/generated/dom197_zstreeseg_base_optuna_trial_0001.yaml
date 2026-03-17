@@ -1,5 +1,5 @@
 experiment_name: forest_agent_dev
-run_name: dom197_zstreeseg_base_agent_round_01
+run_name: dom197_zstreeseg_base_optuna_trial_0001
 compartment_id: dom197_demo
 patch_id: dom197_full
 forest_type: dense_mixed
@@ -9,8 +9,8 @@ conda_env: tcd
 work_dir: /home/xth/tcd/test_prediction
 input_image: /mnt/e/Learning_documents/DEM/dom197.tif
 output_dir: /mnt/e/Learning_documents/output/dom197
-metrics_json: /home/xth/forest_agent_project/outputs/dom197_zstreeseg_base_agent_round_01/metrics.json
-details_csv: /home/xth/forest_agent_project/outputs/dom197_zstreeseg_base_agent_round_01/details.csv
+metrics_json: /home/xth/forest_agent_project/outputs/dom197_zstreeseg_base_optuna_trial_0001/metrics.json
+details_csv: /home/xth/forest_agent_project/outputs/dom197_zstreeseg_base_optuna_trial_0001/details.csv
 xiaoban_shp: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_xiaoban.gpkg
 xiaoban_id_field: XBH
 tree_count_field: LMSL
@@ -36,13 +36,13 @@ default_segmentation_params:
   bsize: 256
   augment: false
   iou_merge_thr: 0.28
-diam_list: 128,256,320
-tile: 1536
-overlap: 384
-tile_overlap: 0.45
+diam_list: 96,192,320
+tile: 2048
+overlap: 512
+tile_overlap: 0.25
 bsize: 256
 augment: true
-iou_merge_thr: 0.22
+iou_merge_thr: 0.28
 dem_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_dem.tif
 slope_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_slope.tif
 aspect_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_aspect.tif

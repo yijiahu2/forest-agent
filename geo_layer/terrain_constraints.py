@@ -1,4 +1,22 @@
 # geo_layer/terrain_constraints.py
+
+# 这是规则层 / 分类层。
+# 它负责把 DEM 派生出来的连续值，统一映射成你现在已经确定的“四元组”：
+# landform_type
+# slope_class
+# aspect_class
+# slope_position_class
+# 所以它解决的是：
+# 定义分类口径，保证全项目只有一套地形约束标准。
+# 它应该放的主要逻辑有：
+# 坡度分级规则
+# 坡向分级规则
+# 坡位分类规则
+# 地貌分类规则
+# 中文/英文标签映射
+# 连续值 → 离散类的统一函数
+
+
 from __future__ import annotations
 
 from dataclasses import dataclass

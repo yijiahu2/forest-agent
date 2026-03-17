@@ -114,6 +114,8 @@ def _apply_spatial_context_constraints(space: Dict[str, Any], spatial_context: O
     terrain_profile = spatial_context.get("dominant_terrain_profile", {})
     slope_class = terrain_profile.get("dominant_slope_class")
     landform = terrain_profile.get("dominant_landform")
+    aspect_class = terrain_profile.get("dominant_aspect_class")
+    slope_position = terrain_profile.get("dominant_slope_position_class")
 
     if slope_class in {"steep", "very_steep"}:
         space["tile"] = [min(space["tile"])]
@@ -125,5 +127,12 @@ def _apply_spatial_context_constraints(space: Dict[str, Any], spatial_context: O
 
     if slope_class in {"flat", "gentle"} and landform in {"plain", "tableland"}:
         space["augment"] = [True]
+
+    if aspect_class in {"north", "northeast", "northwest", "flat_no_aspect"}:
+        space["augment"] = [True]
+
+    if slope_position in {"ridge", "valley"}:
+        space["tile_overlap"] = [max(space["tile_overlap"])]
+        space["overlap"] = [max(space["overlap"])]
 
     return space

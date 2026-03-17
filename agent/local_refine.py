@@ -20,8 +20,16 @@ from rasterio.mask import mask
 from shapely.ops import unary_union
 
 from agent.config_builder import load_yaml, save_yaml
+from geo_layer.instance_ops import (
+    dedupe_instances_by_overlap,
+    filter_instances_to_ids_by_overlap,
+    overlap_share_with_geom,
+    suppress_small_boundary_fragments,
+)
 from geo_layer.terrain_features import generate_terrain_products
 from geo_layer.spatial_context import enrich_xiaoban_clip_fields
+from tools.process_runner import run_streaming
+from tools.stage_cache_client import run_stage1_via_worker, run_stage2_via_worker
 
 # =========================
 # 基础工具
@@ -145,13 +153,12 @@ def prepare_terrain_rasters(
         "dem_tif": dem_tif,
         "slope_tif": slope_tif,
         "aspect_tif": aspect_tif,
+        "landform_tif": None,
+        "slope_position_tif": None,
         "terrain_generated": False,
     }
 
     if dem_tif is None:
-        return result
-
-    if slope_tif is not None and aspect_tif is not None:
         return result
 
     terrain_dir = Path(work_dir) / "terrain_cache"
@@ -159,16 +166,27 @@ def prepare_terrain_rasters(
 
     auto_slope = terrain_dir / f"{Path(dem_tif).stem}_slope.tif"
     auto_aspect = terrain_dir / f"{Path(dem_tif).stem}_aspect.tif"
+    auto_landform = terrain_dir / f"{Path(dem_tif).stem}_landform.tif"
+    auto_slope_position = terrain_dir / f"{Path(dem_tif).stem}_slope_position.tif"
+
+    if slope_tif is not None and aspect_tif is not None and auto_landform.exists() and auto_slope_position.exists():
+        result["landform_tif"] = str(auto_landform)
+        result["slope_position_tif"] = str(auto_slope_position)
+        return result
 
     generate_terrain_products(
         dem_tif=dem_tif,
         slope_tif=str(auto_slope),
         aspect_tif=str(auto_aspect),
+        landform_tif=str(auto_landform),
+        slope_position_tif=str(auto_slope_position),
         z_factor=1.0,
     )
 
     result["slope_tif"] = str(auto_slope)
     result["aspect_tif"] = str(auto_aspect)
+    result["landform_tif"] = str(auto_landform)
+    result["slope_position_tif"] = str(auto_slope_position)
     result["terrain_generated"] = True
     return result
 
@@ -266,6 +284,8 @@ def crop_roi_terrain_bundle(
     dem_tif: Optional[str] = None,
     slope_tif: Optional[str] = None,
     aspect_tif: Optional[str] = None,
+    landform_tif: Optional[str] = None,
+    slope_position_tif: Optional[str] = None,
 ) -> Dict[str, Optional[str]]:
     roi_dir = Path(roi_dir)
     roi_dir.mkdir(parents=True, exist_ok=True)
@@ -274,6 +294,8 @@ def crop_roi_terrain_bundle(
         "roi_dem_tif": None,
         "roi_slope_tif": None,
         "roi_aspect_tif": None,
+        "roi_landform_tif": None,
+        "roi_slope_position_tif": None,
     }
 
     if dem_tif:
@@ -290,6 +312,16 @@ def crop_roi_terrain_bundle(
         roi_aspect_tif = roi_dir / "roi_aspect.tif"
         crop_raster_to_geometry(aspect_tif, roi_geom_gdf, str(roi_aspect_tif))
         out["roi_aspect_tif"] = str(roi_aspect_tif)
+
+    if landform_tif:
+        roi_landform_tif = roi_dir / "roi_landform.tif"
+        crop_raster_to_geometry(landform_tif, roi_geom_gdf, str(roi_landform_tif))
+        out["roi_landform_tif"] = str(roi_landform_tif)
+
+    if slope_position_tif:
+        roi_slope_position_tif = roi_dir / "roi_slope_position.tif"
+        crop_raster_to_geometry(slope_position_tif, roi_geom_gdf, str(roi_slope_position_tif))
+        out["roi_slope_position_tif"] = str(roi_slope_position_tif)
 
     return out
 
@@ -406,6 +438,8 @@ def build_local_refine_config(
     cfg["input_image"] = local_input_image
     cfg["output_dir"] = local_output_dir
     cfg["xiaoban_shp"] = local_xiaoban_shp
+    cfg["_grouped_dispatch_active"] = True
+    cfg["disable_mlflow"] = True
 
     if local_dem_tif:
         cfg["dem_tif"] = local_dem_tif
@@ -466,12 +500,27 @@ def merge_global_and_local_instances(
     local_gdf = local_gdf.to_crs(global_gdf.crs)
 
     bad_union = unary_union(bad.geometry.tolist())
+    bad_projected = xgdf.to_crs(global_gdf.crs)
+    local_filtered = filter_instances_to_ids_by_overlap(
+        inst_gdf=local_gdf,
+        polygon_gdf=bad_projected,
+        id_field=xiaoban_id_field,
+        allowed_ids=bad_ids,
+    )
+    local_filtered = suppress_small_boundary_fragments(
+        local_filtered,
+        bad_projected[bad_projected[xiaoban_id_field].isin([str(x) for x in bad_ids])].copy(),
+        boundary_band_m=1.5,
+        min_area_m2=6.0,
+    )
 
-    # 删掉全图中与 bad 小班相交的旧实例，用局部新实例替换
-    global_keep = global_gdf[~global_gdf.geometry.intersects(bad_union)].copy()
+    global_overlap_ratio = global_gdf.geometry.apply(lambda geom: overlap_share_with_geom(geom, bad_union))
+    global_centroid_in_bad = global_gdf.geometry.centroid.within(bad_union)
+    global_keep = global_gdf[~((global_overlap_ratio >= 0.5) | global_centroid_in_bad)].copy()
 
-    merged = pd.concat([global_keep, local_gdf], ignore_index=True)
+    merged = pd.concat([global_keep, local_filtered], ignore_index=True)
     merged = gpd.GeoDataFrame(merged, geometry="geometry", crs=global_gdf.crs)
+    merged = dedupe_instances_by_overlap(merged, overlap_ratio_thr=0.5)
 
     out_path = Path(out_merged_shp)
     ensure_parent(out_path)
@@ -495,8 +544,9 @@ def evaluate_merged_result(
     merged_details_csv = str(local_root / "merged_details.csv")
 
     cmd = [
-        "python",
-        "/home/xth/forest_agent_project/scripts/evaluate_xiaoban_consistency.py",
+        sys.executable,
+        "-m",
+        "scripts.evaluate_xiaoban_consistency",
         "--inst_shp", merged_shp,
         "--patch_raster", base_cfg["input_image"],
         "--xiaoban_shp", base_cfg["xiaoban_shp"],
@@ -521,23 +571,81 @@ def evaluate_merged_result(
     if aspect_tif:
         cmd.extend(["--aspect_tif", aspect_tif])
 
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    res = run_streaming(cmd, cwd=str(PROJECT_ROOT))
     if res.returncode != 0:
-        raise RuntimeError(f"merged evaluation failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}")
+        raise RuntimeError(f"merged evaluation failed:\n{res.stdout}")
 
     compare_json = str(local_root / "refine_compare_summary.json")
-    compare_cmd = [
-        "python",
-        "/home/xth/forest_agent_project/scripts/evaluate_local_refine_result.py",
-        "--base_metrics_json", base_cfg["metrics_json"],
-        "--base_details_csv", base_cfg["details_csv"],
-        "--merged_metrics_json", merged_metrics_json,
-        "--merged_details_csv", merged_details_csv,
-        "--out_json", compare_json,
+    with open(base_cfg["metrics_json"], "r", encoding="utf-8") as f:
+        before_metrics = json.load(f)
+    with open(merged_metrics_json, "r", encoding="utf-8") as f:
+        after_metrics = json.load(f)
+
+    before_details = pd.read_csv(base_cfg["details_csv"])
+    after_details = pd.read_csv(merged_details_csv)
+
+    if "xiaoban_id" in before_details.columns:
+        before_details["xiaoban_id"] = before_details["xiaoban_id"].astype(str)
+    if "xiaoban_id" in after_details.columns:
+        after_details["xiaoban_id"] = after_details["xiaoban_id"].astype(str)
+
+    metric_keys = [
+        "tree_count_error_ratio",
+        "mean_crown_width_error_ratio",
+        "closure_error_abs",
+        "density_error_abs",
     ]
-    res2 = subprocess.run(compare_cmd, capture_output=True, text=True)
-    if res2.returncode != 0:
-        raise RuntimeError(f"compare failed:\nSTDOUT:\n{res2.stdout}\nSTDERR:\n{res2.stderr}")
+
+    compare = {
+        "base_metrics_json": base_cfg["metrics_json"],
+        "merged_metrics_json": merged_metrics_json,
+        "base_details_csv": base_cfg["details_csv"],
+        "merged_details_csv": merged_details_csv,
+        "bad_xiaoban_ids": [str(x) for x in bad_ids],
+        "global_before_after": {},
+        "bad_xiaoban_before_after": [],
+        "group_plan": group_plan,
+        "terrain_rule_config": {
+            "flat_slope_threshold_deg": base_cfg.get("flat_slope_threshold_deg", 5.0),
+            "plain_relief_threshold_m": base_cfg.get("plain_relief_threshold_m", 30.0),
+        },
+    }
+
+    for key in metric_keys:
+        before_v = before_metrics.get(key)
+        after_v = after_metrics.get(key)
+        compare["global_before_after"][key] = {
+            "before": before_v,
+            "after": after_v,
+            "delta": (after_v - before_v) if (before_v is not None and after_v is not None) else None,
+        }
+
+    if (
+        bad_ids
+        and "xiaoban_id" in before_details.columns
+        and "xiaoban_id" in after_details.columns
+    ):
+        merged_bad = before_details.merge(
+            after_details,
+            on="xiaoban_id",
+            suffixes=("_before", "_after"),
+        )
+        merged_bad = merged_bad[merged_bad["xiaoban_id"].isin([str(x) for x in bad_ids])].copy()
+
+        for _, row in merged_bad.iterrows():
+            compare["bad_xiaoban_before_after"].append(
+                {
+                    "xiaoban_id": row["xiaoban_id"],
+                    "tree_count_error_abs_before": row.get("tree_count_error_abs_before"),
+                    "tree_count_error_abs_after": row.get("tree_count_error_abs_after"),
+                    "mean_crown_width_error_abs_before": row.get("mean_crown_width_error_abs_before"),
+                    "mean_crown_width_error_abs_after": row.get("mean_crown_width_error_abs_after"),
+                    "closure_error_abs_before": row.get("closure_error_abs_before"),
+                    "closure_error_abs_after": row.get("closure_error_abs_after"),
+                }
+            )
+
+    Path(compare_json).write_text(json.dumps(compare, indent=2, ensure_ascii=False), encoding="utf-8")
 
     return {
         "merged_metrics_json": merged_metrics_json,
@@ -611,8 +719,21 @@ def detect_terrain_profile(row: pd.Series) -> Dict[str, Any]:
     mean_slope = safe_float(row.get("mean_slope"), None)
     relief_elev = safe_float(row.get("relief_elev"), None)
     dominant_aspect = safe_str(row.get("dominant_aspect_class"), None)
+    landform_type = safe_str(row.get("landform_type"), None)
+    raw_slope_class = safe_str(row.get("slope_class"), None)
+    aspect_class = safe_str(row.get("aspect_class"), dominant_aspect)
+    slope_position_class = safe_str(row.get("slope_position_class"), None)
 
-    if mean_slope is None:
+    if raw_slope_class:
+        if raw_slope_class.startswith(("IV", "V", "VI")):
+            slope_class = "steep"
+        elif raw_slope_class.startswith("III"):
+            slope_class = "moderate"
+        elif raw_slope_class.startswith(("I", "II")):
+            slope_class = "gentle"
+        else:
+            slope_class = "unknown"
+    elif mean_slope is None:
         slope_class = "unknown"
     elif mean_slope >= 25:
         slope_class = "steep"
@@ -634,7 +755,11 @@ def detect_terrain_profile(row: pd.Series) -> Dict[str, Any]:
         "mean_slope": mean_slope,
         "relief_elev": relief_elev,
         "dominant_aspect_class": dominant_aspect,
+        "landform_type": landform_type,
         "slope_class": slope_class,
+        "terrain_slope_class": raw_slope_class,
+        "aspect_class": aspect_class,
+        "slope_position_class": slope_position_class,
         "relief_class": relief_class,
     }
 
@@ -662,6 +787,9 @@ def choose_local_params_for_one_xiaoban(
     density_direction = err_profile["density_direction"]
 
     slope_class = terrain_profile["slope_class"]
+    landform_type = terrain_profile.get("landform_type")
+    aspect_class = terrain_profile.get("aspect_class")
+    slope_position_class = terrain_profile.get("slope_position_class")
 
     # 1) 数量不足：偏补漏检
     if dominant in ("count", "density") and (count_direction == "under" or density_direction == "low"):
@@ -696,26 +824,31 @@ def choose_local_params_for_one_xiaoban(
                 "iou_merge_thr": 0.28,
             })
 
+        if aspect_class in {"north", "northeast", "northwest", "flat_no_aspect"}:
+            params["augment"] = True
+        if slope_position_class in {"ridge", "valley"}:
+            params["tile_overlap"] = max(float(params["tile_overlap"]), 0.45)
+
     # 2) 数量过多：偏抑制过分裂/过检
     elif dominant in ("count", "density") and (count_direction == "over" or density_direction == "high"):
         if slope_class == "steep":
             strategy = "steep_count_over"
             params.update({
                 "diam_list": "128,256,320",
-                "tile": 1536,
+                "tile": 2048,
                 "overlap": 512,
-                "tile_overlap": 0.35,
-                "augment": True,
+                "tile_overlap": 0.25,
+                "augment": False,
                 "iou_merge_thr": 0.28,
             })
         else:
             strategy = "count_over"
             params.update({
                 "diam_list": "128,256,320",
-                "tile": 1536,
+                "tile": 2048,
                 "overlap": 512,
-                "tile_overlap": 0.35,
-                "augment": True,
+                "tile_overlap": 0.25,
+                "augment": False,
                 "iou_merge_thr": 0.28,
             })
 
@@ -725,21 +858,21 @@ def choose_local_params_for_one_xiaoban(
             strategy = "steep_crown_focus"
             params.update({
                 "diam_list": "128,256,320",
-                "tile": 1536,
+                "tile": 2048,
                 "overlap": 512,
-                "tile_overlap": 0.45,
-                "augment": True,
-                "iou_merge_thr": 0.24,
+                "tile_overlap": 0.35,
+                "augment": False,
+                "iou_merge_thr": 0.28,
             })
         else:
             strategy = "crown_focus"
             params.update({
                 "diam_list": "128,256,320",
-                "tile": 1536,
+                "tile": 2048,
                 "overlap": 512,
-                "tile_overlap": 0.45,
-                "augment": True,
-                "iou_merge_thr": 0.24,
+                "tile_overlap": 0.35,
+                "augment": False,
+                "iou_merge_thr": 0.28,
             })
 
     # 4) 覆盖/郁闭主导：优先覆盖恢复
@@ -769,10 +902,10 @@ def choose_local_params_for_one_xiaoban(
             strategy = "closure_high"
             params.update({
                 "diam_list": "128,256,320",
-                "tile": 1536,
+                "tile": 2048,
                 "overlap": 512,
-                "tile_overlap": 0.35,
-                "augment": True,
+                "tile_overlap": 0.25,
+                "augment": False,
                 "iou_merge_thr": 0.28,
             })
 
@@ -798,6 +931,9 @@ def choose_local_params_for_one_xiaoban(
                 "augment": True,
                 "iou_merge_thr": 0.28,
             })
+
+    if landform_type in {"mountain_middle", "mountain_low", "hill_high"}:
+        params["iou_merge_thr"] = max(float(params["iou_merge_thr"]), 0.24)
 
     params = sanitize_params(params)
 
@@ -921,6 +1057,8 @@ def run_one_group_refinement(
         dem_tif=terrain_info.get("dem_tif"),
         slope_tif=terrain_info.get("slope_tif"),
         aspect_tif=terrain_info.get("aspect_tif"),
+        landform_tif=terrain_info.get("landform_tif"),
+        slope_position_tif=terrain_info.get("slope_position_tif"),
     )
 
     local_cfg = build_local_refine_config(
@@ -931,28 +1069,20 @@ def run_one_group_refinement(
         local_xiaoban_shp=local_xiaoban,
         params=params,
         run_name=group_name,
-        local_dem_tif=terrain_roi_outputs.get("dem_tif"),
-        local_slope_tif=terrain_roi_outputs.get("slope_tif"),
-        local_aspect_tif=terrain_roi_outputs.get("aspect_tif"),
-        local_landform_tif=terrain_roi_outputs.get("landform_tif"),
-        local_slope_position_tif=terrain_roi_outputs.get("slope_position_tif"),
+        local_dem_tif=terrain_roi_outputs.get("roi_dem_tif"),
+        local_slope_tif=terrain_roi_outputs.get("roi_slope_tif"),
+        local_aspect_tif=terrain_roi_outputs.get("roi_aspect_tif"),
+        local_landform_tif=terrain_roi_outputs.get("roi_landform_tif"),
+        local_slope_position_tif=terrain_roi_outputs.get("roi_slope_position_tif"),
     )
 
-    cmd = [
-        "python",
-        "/home/xth/forest_agent_project/scripts/run_zstreeseg_experiment.py",
-        "--config",
-        local_config,
-    ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        stage1_info = run_stage1_via_worker(local_cfg)
+        stage2_info = run_stage2_via_worker(local_cfg, stage1_info["m_sem_tif"])
+    except Exception as e:
+        raise RuntimeError(f"Local refine failed [{group_name}]:\n{e}")
 
-    print(f"\n===== LOCAL REFINE STDOUT ({group_name}) =====\n", res.stdout)
-    print(f"\n===== LOCAL REFINE STDERR ({group_name}) =====\n", res.stderr)
-
-    if res.returncode != 0:
-        raise RuntimeError(f"Local refine failed [{group_name}]:\n{res.stderr}")
-
-    local_inst_shp = str(Path(local_output_dir) / "Y_inst.shp")
+    local_inst_shp = stage2_info["y_inst_shp"]
     if not Path(local_inst_shp).exists():
         raise FileNotFoundError(f"Local Y_inst.shp not found: {local_inst_shp}")
 
@@ -983,6 +1113,8 @@ def run_one_group_refinement(
         "roi_dem_tif": terrain_roi_outputs["roi_dem_tif"],
         "roi_slope_tif": terrain_roi_outputs["roi_slope_tif"],
         "roi_aspect_tif": terrain_roi_outputs["roi_aspect_tif"],
+        "roi_landform_tif": terrain_roi_outputs["roi_landform_tif"],
+        "roi_slope_position_tif": terrain_roi_outputs["roi_slope_position_tif"],
         "members": group.get("members", []),
     }
 
@@ -1088,6 +1220,8 @@ def run_local_refinement(
                 "roi_dem_tif": gs.get("roi_dem_tif"),
                 "roi_slope_tif": gs.get("roi_slope_tif"),
                 "roi_aspect_tif": gs.get("roi_aspect_tif"),
+                "roi_landform_tif": gs.get("roi_landform_tif"),
+                "roi_slope_position_tif": gs.get("roi_slope_position_tif"),
             }
             for gs in group_summaries
         ],

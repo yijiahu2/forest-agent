@@ -1,5 +1,5 @@
 experiment_name: forest_agent_dev
-run_name: dom197_zstreeseg_base_agent_round_01
+run_name: group_01_moderate_count_under_17
 compartment_id: dom197_demo
 patch_id: dom197_full
 forest_type: dense_mixed
@@ -7,11 +7,11 @@ agent_version: v1
 conda_sh: /home/xth/anaconda3/etc/profile.d/conda.sh
 conda_env: tcd
 work_dir: /home/xth/tcd/test_prediction
-input_image: /mnt/e/Learning_documents/DEM/dom197.tif
-output_dir: /mnt/e/Learning_documents/output/dom197
-metrics_json: /home/xth/forest_agent_project/outputs/dom197_zstreeseg_base_agent_round_01/metrics.json
-details_csv: /home/xth/forest_agent_project/outputs/dom197_zstreeseg_base_agent_round_01/details.csv
-xiaoban_shp: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_xiaoban.gpkg
+input_image: /home/xth/forest_agent_project/outputs/local_refine/local_refine_17_1_20260317_205537/group_01_moderate_count_under_17/roi_image.tif
+output_dir: /home/xth/forest_agent_project/outputs/local_refine/local_refine_17_1_20260317_205537/group_01_moderate_count_under_17/seg_output
+metrics_json: /home/xth/forest_agent_project/outputs/local_refine/local_refine_17_1_20260317_205537/group_01_moderate_count_under_17/seg_output/metrics.json
+details_csv: /home/xth/forest_agent_project/outputs/local_refine/local_refine_17_1_20260317_205537/group_01_moderate_count_under_17/seg_output/details.csv
+xiaoban_shp: /home/xth/forest_agent_project/outputs/local_refine/local_refine_17_1_20260317_205537/group_01_moderate_count_under_17/roi_xiaoban.gpkg
 xiaoban_id_field: XBH
 tree_count_field: LMSL
 crown_field: PJGF
@@ -36,18 +36,18 @@ default_segmentation_params:
   bsize: 256
   augment: false
   iou_merge_thr: 0.28
-diam_list: 128,256,320
+diam_list: 96,192,320
 tile: 1536
-overlap: 384
-tile_overlap: 0.45
+overlap: 512
+tile_overlap: 0.35
 bsize: 256
 augment: true
-iou_merge_thr: 0.22
-dem_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_dem.tif
-slope_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_slope.tif
-aspect_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_aspect.tif
-landform_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_landform.tif
-slope_position_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_slope_position.tif
+iou_merge_thr: 0.28
+dem_tif: /home/xth/forest_agent_project/outputs/local_refine/local_refine_17_1_20260317_205537/group_01_moderate_count_under_17/roi_dem.tif
+slope_tif: /home/xth/forest_agent_project/outputs/local_refine/local_refine_17_1_20260317_205537/group_01_moderate_count_under_17/roi_slope.tif
+aspect_tif: /home/xth/forest_agent_project/outputs/local_refine/local_refine_17_1_20260317_205537/group_01_moderate_count_under_17/roi_aspect.tif
+landform_tif: /home/xth/forest_agent_project/outputs/local_refine/local_refine_17_1_20260317_205537/group_01_moderate_count_under_17/roi_landform.tif
+slope_position_tif: /home/xth/forest_agent_project/outputs/local_refine/local_refine_17_1_20260317_205537/group_01_moderate_count_under_17/roi_slope_position.tif
 spatial_context_summary_json: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/spatial_context_summary.json
 spatial_context_object:
   spatial_context_enabled: true
@@ -112,3 +112,5 @@ spatial_context_object:
     slope_position_class: slope_position_class
   dominant_terrain_profile: *id001
 spatial_context_object_json: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context_object.json
+_grouped_dispatch_active: true
+disable_mlflow: true

@@ -34,14 +34,34 @@ terrain_slope_position_field: slope_position_class
 stage1_script: stage1_segformer_sliding.py
 stage2_script: stage2_cellpose_sam_sliding_v2.py
 
-diam_list: "96,160,256"
-tile: 1536
-overlap: 384
+grouped_inference_enabled: true
+grouped_inference_use_llm: true
+grouped_inference_buffer_m: 5.0
+
+# Default fallback segmentation params.
+# Current code still reads the top-level fields below directly.
+# In the planned grouped/planner workflow, these values should be treated as
+# template defaults and overridden by data-driven per-group configs.
+default_segmentation_params:
+  diam_list: "128,192,320"
+  tile: 2048
+  overlap: 512
+  tile_overlap: 0.35
+  bsize: 256
+  augment: false
+  iou_merge_thr: 0.28
+
+# Backward-compatible top-level params used by the current pipeline.
+diam_list: "128,192,320"
+tile: 2048
+overlap: 512
 tile_overlap: 0.35
 bsize: 256
-augment: true
-iou_merge_thr: 0.18
+augment: false
+iou_merge_thr: 0.28
 
 dem_tif: /mnt/e/Learning_documents/DEM/shanxia_DEM1m.tif
 slope_tif:
 aspect_tif:
+landform_tif:
+slope_position_tif:

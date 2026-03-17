@@ -1,9 +1,24 @@
+# spatial_context.py
+
+# 这是场景装配层 / 主流程接入层。
+# 它负责把第四层结果真正接到主线 ROI 流程里，例如：
+
+# 裁剪 DOM 同范围 DE
+# 调用 terrain_features.py 生成 slope/aspect/landform/slope_position
+# 裁剪小班矢量
+# 把 DEM 四元组和连续统计回写进 context_xiaoban.gpkg
+# 返回给主程序统一消费
+
+# 所以它解决的是：
+# 怎么接进主流程
+
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
+from collections import Counter
 
 import geopandas as gpd
 import numpy as np
@@ -12,6 +27,7 @@ import rasterio
 from rasterio.mask import mask
 from shapely.geometry import box
 
+from geo_layer.crown_metrics import standardize_inventory_crown_width
 from geo_layer.terrain_features import generate_terrain_products
 from geo_layer.terrain_constraints import summarize_terrain_classes, TerrainRuleConfig
 
@@ -215,6 +231,33 @@ def aspect_stats_for_geom(aspect_raster_path: str, geom_gdf: gpd.GeoDataFrame) -
     }
 
 
+def _dominant_non_null(series: pd.Series) -> Optional[str]:
+    vals = [str(v) for v in series.dropna().tolist() if str(v).strip()]
+    if not vals:
+        return None
+    return Counter(vals).most_common(1)[0][0]
+
+
+def summarize_xiaoban_terrain_classes(gdf: gpd.GeoDataFrame) -> Dict[str, Any]:
+    if gdf is None or len(gdf) == 0:
+        return {}
+
+    summary: Dict[str, Any] = {
+        "num_xiaoban": int(len(gdf)),
+        "dominant_landform": _dominant_non_null(gdf["landform_type"]) if "landform_type" in gdf.columns else None,
+        "dominant_slope_class": _dominant_non_null(gdf["slope_class"]) if "slope_class" in gdf.columns else None,
+        "dominant_aspect_class": _dominant_non_null(gdf["aspect_class"]) if "aspect_class" in gdf.columns else None,
+        "dominant_slope_position_class": _dominant_non_null(gdf["slope_position_class"]) if "slope_position_class" in gdf.columns else None,
+    }
+
+    for col in ["elevation_mean_m", "slope_mean_deg", "aspect_mean_deg", "relief_10km_m"]:
+        if col in gdf.columns:
+            vals = pd.to_numeric(gdf[col], errors="coerce").dropna()
+            summary[f"{col}_mean"] = float(vals.mean()) if len(vals) > 0 else None
+
+    return summary
+
+
 def enrich_xiaoban_clip_fields(
     clipped_gdf: gpd.GeoDataFrame,
     source_gdf: gpd.GeoDataFrame,
@@ -236,6 +279,37 @@ def enrich_xiaoban_clip_fields(
 
     clipped = clipped_gdf.copy()
     source = source_gdf.copy()
+
+    # 支持对已经富化过一次的小班再次裁剪并重算。
+    # 否则 clipped/source 中已有的派生列会在 merge 时触发同名冲突，
+    # 生成 *_x/*_y 后缀，后续再按标准列名读取就会报 KeyError。
+    derived_fields_to_reset = [
+        "clip_area_m2",
+        "clip_area_ha",
+        "orig_geom_area_m2",
+        "inventory_area_m2",
+        "overlap_ratio_geom",
+        "overlap_ratio_inventory",
+        "overlap_ratio_in_xiaoban",
+        "est_tree_count_clip",
+        "est_density_per_ha",
+        "est_tree_count_by_clip_area",
+        "inventory_crown_width_m",
+        "elevation_mean_m",
+        "relief_10km_m",
+        "slope_mean_deg",
+        "aspect_mean_deg",
+        "relative_elevation_norm",
+        "landform_type",
+        "landform_type_cn",
+        "slope_class",
+        "slope_class_cn",
+        "aspect_class",
+        "aspect_class_cn",
+        "slope_position_class",
+        "slope_position_class_cn",
+    ]
+    clipped = clipped.drop(columns=[c for c in derived_fields_to_reset if c in clipped.columns], errors="ignore")
 
     clipped[xiaoban_id_field] = clipped[xiaoban_id_field].astype(str)
     source[xiaoban_id_field] = source[xiaoban_id_field].astype(str)
@@ -262,6 +336,7 @@ def enrich_xiaoban_clip_fields(
         on=xiaoban_id_field,
         how="left",
     )
+    source_area = source_area.drop_duplicates(subset=[xiaoban_id_field], keep="first")
 
     clipped_metric = clipped.to_crs(metric_crs)
     clipped["clip_area_m2"] = clipped_metric.geometry.area.astype(float)
@@ -292,7 +367,8 @@ def enrich_xiaoban_clip_fields(
         clipped["est_tree_count_by_clip_area"] = clipped["est_density_per_ha"] * clipped["clip_area_ha"]
 
     if crown_field and crown_field in clipped.columns:
-        clipped[crown_field] = pd.to_numeric(clipped[crown_field], errors="coerce")
+        clipped[crown_field] = clipped[crown_field].apply(standardize_inventory_crown_width)
+        clipped["inventory_crown_width_m"] = clipped[crown_field]
     if closure_field and closure_field in clipped.columns:
         clipped[closure_field] = pd.to_numeric(clipped[closure_field], errors="coerce")
 
@@ -451,6 +527,11 @@ def prepare_spatial_context(
         "dom_bounds": bounds_dict,
         "dom_crs": str(dom_crs),
         "dom_shape": [int(dom_profile["height"]), int(dom_profile["width"])],
+        "global_dem_tif": str(dem_tif) if dem_tif else None,
+        "global_slope_tif": None,
+        "global_aspect_tif": None,
+        "global_landform_tif": None,
+        "global_slope_position_tif": None,
         "dem_tif": None,
         "slope_tif": None,
         "aspect_tif": None,
@@ -467,6 +548,35 @@ def prepare_spatial_context(
     }
 
     if dem_tif:
+        global_slope = Path(dem_tif).with_name(f"{Path(dem_tif).stem}_slope.tif")
+        global_aspect = Path(dem_tif).with_name(f"{Path(dem_tif).stem}_aspect.tif")
+        global_landform = Path(dem_tif).with_name(f"{Path(dem_tif).stem}_landform.tif")
+        global_slope_position = Path(dem_tif).with_name(f"{Path(dem_tif).stem}_slope_position.tif")
+        global_summary_json = Path(dem_tif).with_name(f"{Path(dem_tif).stem}_terrain_summary.json")
+
+        if not (
+            global_slope.exists()
+            and global_aspect.exists()
+            and global_landform.exists()
+            and global_slope_position.exists()
+        ):
+            generate_terrain_products(
+                dem_tif=str(dem_tif),
+                slope_tif=str(global_slope),
+                aspect_tif=str(global_aspect),
+                landform_tif=str(global_landform),
+                slope_position_tif=str(global_slope_position),
+                terrain_summary_json=str(global_summary_json),
+                z_factor=1.0,
+                flat_slope_threshold_deg=flat_slope_threshold_deg,
+                plain_relief_threshold_m=plain_relief_threshold_m,
+            )
+
+        result["global_slope_tif"] = str(global_slope) if global_slope.exists() else None
+        result["global_aspect_tif"] = str(global_aspect) if global_aspect.exists() else None
+        result["global_landform_tif"] = str(global_landform) if global_landform.exists() else None
+        result["global_slope_position_tif"] = str(global_slope_position) if global_slope_position.exists() else None
+
         dem_clip = out_dir / "context_dem.tif"
         slope_clip = out_dir / "context_slope.tif"
         aspect_clip = out_dir / "context_aspect.tif"
@@ -524,6 +634,11 @@ def prepare_spatial_context(
         )
         result["xiaoban_shp"] = str(xiaoban_clip)
         result["xiaoban_vector"] = str(xiaoban_clip)
+        try:
+            xiaoban_context = gpd.read_file(xiaoban_clip)
+            result["terrain_class_summary"] = summarize_xiaoban_terrain_classes(xiaoban_context)
+        except Exception:
+            result["terrain_class_summary"] = {}
 
     summary_json = out_dir / "spatial_context_summary.json"
     with open(summary_json, "w", encoding="utf-8") as f:

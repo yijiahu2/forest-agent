@@ -42,6 +42,13 @@ def summarize_details_csv(details_csv_path: str, top_k: int = 3) -> Dict[str, An
         "expected_closure",
         "expected_density",
         "pred_density_trees_per_ha",
+        "elevation_mean_m",
+        "slope_mean_deg",
+        "aspect_mean_deg",
+        "landform_type",
+        "slope_class",
+        "aspect_class",
+        "slope_position_class",
     ]:
         if col not in df.columns:
             df[col] = None
@@ -83,6 +90,13 @@ def summarize_details_csv(details_csv_path: str, top_k: int = 3) -> Dict[str, An
             "pred_density_trees_per_ha": safe_float(row.get("pred_density_trees_per_ha")),
             "expected_density": safe_float(row.get("expected_density")),
             "density_error_abs": safe_float(row.get("density_error_abs")),
+            "elevation_mean_m": safe_float(row.get("elevation_mean_m")),
+            "slope_mean_deg": safe_float(row.get("slope_mean_deg")),
+            "aspect_mean_deg": safe_float(row.get("aspect_mean_deg")),
+            "landform_type": row.get("landform_type"),
+            "slope_class": row.get("slope_class"),
+            "aspect_class": row.get("aspect_class"),
+            "slope_position_class": row.get("slope_position_class"),
 
             "error_score": safe_float(row.get("error_score")),
         })

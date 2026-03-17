@@ -6,6 +6,7 @@ from typing import Dict, Any
 
 import pandas as pd
 import yaml
+from tools.process_runner import run_streaming
 
 
 def load_json(path: str) -> Dict[str, Any]:
@@ -52,13 +53,10 @@ def run_merged_evaluation(
         "--area_ha_field", base_cfg["area_ha_field"],
     ]
 
-    res = subprocess.run(cmd, capture_output=True, text=True)
-
-    print("\n===== MERGED EVAL STDOUT =====\n", res.stdout)
-    print("\n===== MERGED EVAL STDERR =====\n", res.stderr)
+    res = run_streaming(cmd)
 
     if res.returncode != 0:
-        raise RuntimeError(f"Merged evaluation failed:\n{res.stderr}")
+        raise RuntimeError(f"Merged evaluation failed:\n{res.stdout}")
 
     if not Path(merged_metrics_json).exists():
         raise FileNotFoundError(f"merged_metrics.json not found: {merged_metrics_json}")

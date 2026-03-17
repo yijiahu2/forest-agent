@@ -57,6 +57,7 @@ def compute_candidate_score(row: pd.Series, weights: dict[str, float]) -> float:
     score -= min(mean_slope / 45.0, 1.0) * 0.05
     score -= min(relief / 80.0, 1.0) * 0.05
     score += _terrain_bonus(row)
+    score -= _terrain_penalty(row)
     return float(score)
 
 
@@ -78,13 +79,26 @@ def _load_spatial_context(cfg: dict) -> dict:
 
 def _terrain_bonus(row: pd.Series) -> float:
     bonus = 0.0
-    if str(row.get("slope_class") or "") in {"flat", "gentle"}:
+    if str(row.get("slope_class") or "") in {"flat", "gentle", "I_flat", "II_gentle"}:
         bonus += 0.03
     if str(row.get("landform_type") or "") in {"plain", "tableland"}:
         bonus += 0.02
     if str(row.get("slope_position_class") or "") in {"lower", "middle"}:
         bonus += 0.01
+    if str(row.get("aspect_class") or row.get("dominant_aspect_class") or "") in {"north", "northeast", "northwest"}:
+        bonus += 0.01
     return bonus
+
+
+def _terrain_penalty(row: pd.Series) -> float:
+    penalty = 0.0
+    if str(row.get("slope_class") or "") in {"IV_steep", "V_very_steep", "VI_dangerous", "steep"}:
+        penalty += 0.03
+    if str(row.get("landform_type") or "") in {"mountain_middle", "mountain_low", "hill_high"}:
+        penalty += 0.02
+    if str(row.get("slope_position_class") or "") in {"ridge", "valley"}:
+        penalty += 0.02
+    return penalty
 
 def build_masks(work: pd.DataFrame, cfg: dict, usable_metrics: list[str]) -> tuple[pd.Series, pd.Series]:
     pseudo_mask = pd.Series(True, index=work.index)
@@ -109,6 +123,17 @@ def build_masks(work: pd.DataFrame, cfg: dict, usable_metrics: list[str]) -> tup
     max_relief_easy = float(cfg.get("max_relief_for_easy", 35.0))
     pseudo_mask &= work["mean_slope"].fillna(0.0) <= max_slope_easy
     pseudo_mask &= work["relief_elev"].fillna(0.0) <= max_relief_easy
+
+    complex_mask = pd.Series(False, index=work.index)
+    if "slope_class" in work.columns:
+        complex_mask |= work["slope_class"].astype(str).isin(["IV_steep", "V_very_steep", "VI_dangerous", "steep"])
+    if "landform_type" in work.columns:
+        complex_mask |= work["landform_type"].astype(str).isin(["mountain_middle", "mountain_low", "hill_high"])
+    if "slope_position_class" in work.columns:
+        complex_mask |= work["slope_position_class"].astype(str).isin(["ridge", "valley"])
+
+    pseudo_mask &= ~complex_mask
+    hard_mask |= complex_mask
 
     return pseudo_mask, hard_mask
 

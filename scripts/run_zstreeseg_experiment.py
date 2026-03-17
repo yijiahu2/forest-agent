@@ -16,6 +16,8 @@ import mlflow
 
 from agent.config_builder import load_yaml
 from geo_layer.terrain_features import generate_terrain_products
+from reporting.experiment_report import build_experiment_report
+from tools.process_runner import run_streaming
 
 
 def ensure_parent(path: str | Path):
@@ -39,14 +41,7 @@ def run_cmd(
     cwd: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
 ) -> subprocess.CompletedProcess:
-    print("\n===== CMD =====")
-    print(" ".join(shlex.quote(x) for x in cmd))
-    res = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
-    print("\n===== STDOUT =====")
-    print(res.stdout)
-    print("\n===== STDERR =====")
-    print(res.stderr)
-    return res
+    return run_streaming(cmd, cwd=cwd, env=env)
 
 
 def run_bash_in_conda_env(
@@ -56,19 +51,12 @@ def run_bash_in_conda_env(
     cwd: Optional[str] = None,
 ) -> subprocess.CompletedProcess:
     bash_cmd = f"source {shlex.quote(conda_sh)} && conda activate {shlex.quote(conda_env)} && {command}"
-    print("\n===== BASH CMD =====")
-    print(bash_cmd)
-    res = subprocess.run(
+    return run_streaming(
         ["bash", "-lc", bash_cmd],
         cwd=cwd,
-        capture_output=True,
-        text=True,
+        print_cmd=True,
+        cmd_label="===== BASH CMD =====",
     )
-    print("\n===== STDOUT =====")
-    print(res.stdout)
-    print("\n===== STDERR =====")
-    print(res.stderr)
-    return res
 
 
 def require_file(path: str | Path, desc: str):
@@ -93,9 +81,6 @@ def prepare_terrain_inputs_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if not dem_tif:
         return result
 
-    if slope_tif and aspect_tif:
-        return result
-
     metrics_json = cfg.get("metrics_json")
     if metrics_json:
         terrain_dir = Path(metrics_json).resolve().parent / "terrain_cache"
@@ -105,16 +90,27 @@ def prepare_terrain_inputs_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     auto_slope = terrain_dir / f"{Path(dem_tif).stem}_slope.tif"
     auto_aspect = terrain_dir / f"{Path(dem_tif).stem}_aspect.tif"
+    auto_landform = terrain_dir / f"{Path(dem_tif).stem}_landform.tif"
+    auto_slope_position = terrain_dir / f"{Path(dem_tif).stem}_slope_position.tif"
+
+    if slope_tif and aspect_tif and auto_landform.exists() and auto_slope_position.exists():
+        result["landform_tif"] = str(auto_landform)
+        result["slope_position_tif"] = str(auto_slope_position)
+        return result
 
     generate_terrain_products(
         dem_tif=dem_tif,
         slope_tif=str(auto_slope),
         aspect_tif=str(auto_aspect),
+        landform_tif=str(auto_landform),
+        slope_position_tif=str(auto_slope_position),
         z_factor=1.0,
     )
 
     result["slope_tif"] = str(auto_slope)
     result["aspect_tif"] = str(auto_aspect)
+    result["landform_tif"] = str(auto_landform)
+    result["slope_position_tif"] = str(auto_slope_position)
     result["terrain_generated"] = True
     return result
 
@@ -427,6 +423,11 @@ def log_to_mlflow(
 
 def run_experiment(config_path: str) -> Dict[str, Any]:
     cfg = load_yaml(config_path)
+    if cfg.get("grouped_inference_enabled", False) and not cfg.get("_grouped_dispatch_active", False):
+        from scripts.run_grouped_experiment import run_grouped_experiment
+
+        return run_grouped_experiment(config_path)
+
     cfg["flat_slope_threshold_deg"] = cfg.get("flat_slope_threshold_deg", 5.0)
     cfg["plain_relief_threshold_m"] = cfg.get("plain_relief_threshold_m", 30.0)
     cfg["terrain_landform_field"] = cfg.get("terrain_landform_field", "landform_type")
@@ -473,16 +474,17 @@ def run_experiment(config_path: str) -> Dict[str, Any]:
 
     run_meta = collect_run_metadata(cfg, terrain_info)
 
-    try:
-        log_to_mlflow(
-            cfg=cfg,
-            run_meta=run_meta,
-            stage1_info=stage1_info,
-            stage2_info=stage2_info,
-            eval_info=eval_info,
-        )
-    except Exception as e:
-        print(f"[warn] MLflow logging failed: {e}")
+    if not cfg.get("disable_mlflow", False):
+        try:
+            log_to_mlflow(
+                cfg=cfg,
+                run_meta=run_meta,
+                stage1_info=stage1_info,
+                stage2_info=stage2_info,
+                eval_info=eval_info,
+            )
+        except Exception as e:
+            print(f"[warn] MLflow logging failed: {e}")
 
     summary = {
         "config_path": config_path,
@@ -498,8 +500,17 @@ def run_experiment(config_path: str) -> Dict[str, Any]:
 
     summary_json = str(Path(cfg["metrics_json"]).resolve().parent / "run_experiment_summary.json")
     save_json(summary, summary_json)
+    report_md = str(Path(cfg["metrics_json"]).resolve().parent / "run_experiment_report.md")
+    summary["summary_json"] = summary_json
+    summary["metrics_json"] = eval_info["metrics_json"]
+    summary["details_csv"] = eval_info["details_csv"]
+    summary["run_name"] = cfg.get("run_name")
+    report_path = build_experiment_report(summary, report_md)
+    summary["report_md"] = report_path
+    save_json(summary, summary_json)
 
     print(f"[runner] summary saved to: {summary_json}")
+    print(f"[runner] report saved to: {report_path}")
     return summary
 
 

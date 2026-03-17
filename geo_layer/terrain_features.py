@@ -1,4 +1,17 @@
 # geo_layer/terrain_features.py
+
+# 这是特征生产层 / 栅格派生层。
+# 它负责从 DEM 生成中间地形产品，比如：
+# slope_tif
+# aspect_tif
+# landform_tif
+# slope_position_tif
+# terrain_summary_json
+
+# 所以它解决的是：
+# 从原始 DEM 计算坡度、坡向、地貌、坡位这些产品。
+
+
 from __future__ import annotations
 
 import argparse

@@ -1,8 +1,7 @@
-outputs/
 *.tif
 *.db
-mlruns/
 __pycache__/
 data/
 models/
-
+outputs/
+mlruns

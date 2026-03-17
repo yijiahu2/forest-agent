@@ -21,18 +21,14 @@ import rasterio
 from rasterio.mask import mask
 from shapely.geometry import box
 
+from geo_layer.crown_metrics import (
+    equivalent_crown_width,
+    inventory_mean_crown_width_from_geometry,
+    safe_float,
+    standardize_inventory_crown_width,
+)
+from geo_layer.instance_ops import assign_instances_to_polygons
 from geo_layer.terrain_features import generate_terrain_products
-
-
-def safe_float(v):
-    try:
-        if v is None:
-            return None
-        if pd.isna(v):
-            return None
-        return float(v)
-    except Exception:
-        return None
 
 
 def normalize_closure(v):
@@ -95,12 +91,6 @@ def ensure_projected_metric_crs(gdf, fallback_crs=None):
         raise ValueError(f"Failed to estimate projected CRS: {e}")
 
 
-def equivalent_crown_width(area_m2):
-    if area_m2 is None or area_m2 <= 0:
-        return 0.0
-    return 2.0 * math.sqrt(area_m2 / math.pi)
-
-
 def validate_field_exists(gdf, field_name, required=True):
     if field_name is None:
         return
@@ -137,57 +127,6 @@ def overlay_patch_xiaoban(patch_gdf, xiaoban_gdf, id_field):
     inter["overlap_ratio_in_xiaoban"] = inter["overlap_ratio_in_xiaoban"].fillna(0.0)
 
     return inter
-
-
-def assign_instances_to_xiaoban(inst_gdf, xiaoban_clip_gdf, id_field, method="max_overlap"):
-    """
-    给每个实例分配小班归属
-    method:
-      - centroid
-      - max_overlap
-    """
-    inst = inst_gdf.copy()
-    inst["inst_id"] = range(len(inst))
-
-    if len(inst) == 0:
-        return inst
-
-    if method == "centroid":
-        cent = inst.copy()
-        cent.geometry = cent.centroid
-        joined = gpd.sjoin(
-            cent,
-            xiaoban_clip_gdf[[id_field, "geometry"]],
-            how="left",
-            predicate="within"
-        )
-        inst = inst.merge(joined[["inst_id", id_field]], on="inst_id", how="left")
-        return inst
-
-    ov = gpd.overlay(
-        inst[["inst_id", "geometry"]],
-        xiaoban_clip_gdf[[id_field, "geometry"]],
-        how="intersection"
-    )
-    ov = ov[ov.geometry.notnull() & (~ov.geometry.is_empty)].copy()
-
-    if len(ov) == 0:
-        cent = inst.copy()
-        cent.geometry = cent.centroid
-        joined = gpd.sjoin(
-            cent,
-            xiaoban_clip_gdf[[id_field, "geometry"]],
-            how="left",
-            predicate="within"
-        )
-        inst = inst.merge(joined[["inst_id", id_field]], on="inst_id", how="left")
-        return inst
-
-    ov["overlap_area_m2"] = ov.geometry.area
-    ov = ov.sort_values(["inst_id", "overlap_area_m2"], ascending=[True, False])
-    best = ov.groupby("inst_id", as_index=False).first()[["inst_id", id_field, "overlap_area_m2"]]
-    inst = inst.merge(best, on="inst_id", how="left")
-    return inst
 
 
 # =========================
@@ -329,13 +268,12 @@ def prepare_terrain_inputs(
         "dem_tif": dem_tif,
         "slope_tif": slope_tif,
         "aspect_tif": aspect_tif,
+        "landform_tif": None,
+        "slope_position_tif": None,
         "terrain_generated": False,
     }
 
     if dem_tif is None:
-        return result
-
-    if slope_tif is not None and aspect_tif is not None:
         return result
 
     terrain_dir = Path(work_dir) / "terrain_cache"
@@ -343,18 +281,58 @@ def prepare_terrain_inputs(
 
     auto_slope = terrain_dir / f"{Path(dem_tif).stem}_slope.tif"
     auto_aspect = terrain_dir / f"{Path(dem_tif).stem}_aspect.tif"
+    auto_landform = terrain_dir / f"{Path(dem_tif).stem}_landform.tif"
+    auto_slope_position = terrain_dir / f"{Path(dem_tif).stem}_slope_position.tif"
+
+    if slope_tif is not None and aspect_tif is not None and auto_landform.exists() and auto_slope_position.exists():
+        result["landform_tif"] = str(auto_landform)
+        result["slope_position_tif"] = str(auto_slope_position)
+        return result
 
     generate_terrain_products(
         dem_tif=dem_tif,
         slope_tif=str(auto_slope),
         aspect_tif=str(auto_aspect),
+        landform_tif=str(auto_landform),
+        slope_position_tif=str(auto_slope_position),
         z_factor=1.0,
     )
 
     result["slope_tif"] = str(auto_slope)
     result["aspect_tif"] = str(auto_aspect)
+    result["landform_tif"] = str(auto_landform)
+    result["slope_position_tif"] = str(auto_slope_position)
     result["terrain_generated"] = True
     return result
+
+
+def summarize_stratified_errors(details_df: pd.DataFrame) -> Dict[str, Any]:
+    if details_df is None or len(details_df) == 0:
+        return {}
+
+    metric_cols = [
+        "tree_count_error_ratio",
+        "mean_crown_width_error_ratio",
+        "closure_error_abs",
+        "density_error_abs",
+    ]
+    out: Dict[str, Any] = {}
+    for col in ["landform_type", "slope_class", "aspect_class", "slope_position_class"]:
+        if col not in details_df.columns:
+            continue
+        rows = []
+        for key, sub in details_df.groupby(col, dropna=False):
+            rec: Dict[str, Any] = {
+                col: None if pd.isna(key) else key,
+                "num_samples": int(len(sub)),
+            }
+            for metric_col in metric_cols:
+                if metric_col in sub.columns:
+                    vals = pd.to_numeric(sub[metric_col], errors="coerce").dropna()
+                    rec[f"{metric_col}_mean"] = float(vals.mean()) if len(vals) > 0 else None
+            rows.append(rec)
+        out[f"by_{col}"] = rows
+    return out
 
 
 def attach_terrain_stats_to_xiaoban_clip(
@@ -558,7 +536,7 @@ def compute_patch_level_metrics(
     pred_tree_count = int(len(inst_gdf))
 
     if pred_tree_count > 0:
-        pred_mean_crown_width = float(inst_gdf["eq_crown_width_m"].mean())
+        pred_mean_crown_width = float(inst_gdf["inventory_crown_width_m"].mean())
     else:
         pred_mean_crown_width = 0.0
 
@@ -581,13 +559,14 @@ def compute_patch_level_metrics(
             expected_tree_count = float(sum(vals))
 
     expected_mean_crown_width = None
-    if crown_field and crown_field in xiaoban_clip_gdf.columns:
-        tmp = xiaoban_clip_gdf[[crown_field, "clip_area_m2"]].copy()
-        tmp[crown_field] = pd.to_numeric(tmp[crown_field], errors="coerce")
-        tmp = tmp.dropna(subset=[crown_field])
+    expected_crown_col = "inventory_crown_width_m" if "inventory_crown_width_m" in xiaoban_clip_gdf.columns else crown_field
+    if expected_crown_col and expected_crown_col in xiaoban_clip_gdf.columns:
+        tmp = xiaoban_clip_gdf[[expected_crown_col, "clip_area_m2"]].copy()
+        tmp[expected_crown_col] = tmp[expected_crown_col].apply(standardize_inventory_crown_width)
+        tmp = tmp.dropna(subset=[expected_crown_col])
         if len(tmp) > 0 and tmp["clip_area_m2"].sum() > 0:
             expected_mean_crown_width = float(
-                (tmp[crown_field] * tmp["clip_area_m2"]).sum() / tmp["clip_area_m2"].sum()
+                (tmp[expected_crown_col] * tmp["clip_area_m2"]).sum() / tmp["clip_area_m2"].sum()
             )
 
     expected_closure = None
@@ -687,7 +666,7 @@ def compute_xiaoban_level_details(
         pred_tree_count = int(len(sub))
 
         if pred_tree_count > 0 and xb_area_m2 > 0:
-            pred_mean_crown_width = float(sub["eq_crown_width_m"].mean())
+            pred_mean_crown_width = float(sub["inventory_crown_width_m"].mean())
             clipped_geoms = sub.geometry.intersection(xb_geom)
             pred_cover_ratio = float(union_area(clipped_geoms) / xb_area_m2)
         else:
@@ -708,8 +687,9 @@ def compute_xiaoban_level_details(
             row["pred_density_trees_per_ha"] = 0.0
 
         # 平均冠幅
-        if crown_field and crown_field in xb.index:
-            row["expected_mean_crown_width"] = safe_float(xb[crown_field])
+        crown_value = xb.get("inventory_crown_width_m") if "inventory_crown_width_m" in xb.index else xb.get(crown_field)
+        if crown_value is not None:
+            row["expected_mean_crown_width"] = standardize_inventory_crown_width(crown_value)
             if row["expected_mean_crown_width"] is not None:
                 row["mean_crown_width_error_abs"] = abs(pred_mean_crown_width - row["expected_mean_crown_width"])
 
@@ -905,6 +885,9 @@ def main():
         metrics["num_assigned_instances"] = 0
         metrics["num_boundary_instances"] = 0
         metrics["terrain_info"] = terrain_info
+        metrics["terrain_dem_tif"] = terrain_info.get("dem_tif")
+        metrics["terrain_slope_tif"] = terrain_info.get("slope_tif")
+        metrics["terrain_aspect_tif"] = terrain_info.get("aspect_tif")
         metrics.update(patch_terrain_metrics)
 
         out_json.write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -915,9 +898,10 @@ def main():
 
     inst["inst_area_m2"] = inst.geometry.area
     inst["eq_crown_width_m"] = inst["inst_area_m2"].apply(equivalent_crown_width)
+    inst["inventory_crown_width_m"] = inst.geometry.apply(inventory_mean_crown_width_from_geometry)
 
     # 4. assign instances to xiaoban
-    inst_assigned = assign_instances_to_xiaoban(
+    inst_assigned = assign_instances_to_polygons(
         inst,
         xiaoban_clip,
         args.id_field,
@@ -942,6 +926,9 @@ def main():
     metrics["num_assigned_instances"] = int(len(inst_assigned_valid))
     metrics["num_boundary_instances"] = num_boundary_instances
     metrics["terrain_info"] = terrain_info
+    metrics["terrain_dem_tif"] = terrain_info.get("dem_tif")
+    metrics["terrain_slope_tif"] = terrain_info.get("slope_tif")
+    metrics["terrain_aspect_tif"] = terrain_info.get("aspect_tif")
     metrics.update(patch_terrain_metrics)
 
     # 6. xiaoban-level detail
@@ -955,6 +942,7 @@ def main():
         args.area_ha_field,
         args.density_field
     )
+    metrics["terrain_stratified_error_summary"] = summarize_stratified_errors(details_df)
 
     # 7. save
     out_json.write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
