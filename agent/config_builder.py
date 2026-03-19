@@ -1,4 +1,5 @@
 import copy
+import os
 import yaml
 from pathlib import Path
 from typing import Dict, Any
@@ -18,6 +19,10 @@ def save_yaml(data: Dict[str, Any], path: str):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+
+
+def _default_output_root() -> Path:
+    return Path(os.getenv("FOREST_AGENT_OUTPUT_ROOT", "/home/xth/forest_agent_project/outputs"))
 
 
 def sanitize_next_params(next_params: Dict[str, Any]) -> Dict[str, Any]:
@@ -59,10 +64,8 @@ def build_next_config(
     for k, v in next_params.items():
         cfg[k] = v
 
-    base_output_dir = Path(cfg["output_dir"]).parent
-    cfg["output_dir"] = str(base_output_dir / run_name)
-
-    base_outputs = Path("/home/xth/forest_agent_project/outputs")
+    base_outputs = _default_output_root()
+    cfg["output_dir"] = str(base_outputs / run_name / "seg_output")
     cfg["metrics_json"] = str(base_outputs / run_name / "metrics.json")
     cfg["details_csv"] = str(base_outputs / run_name / "details.csv")
 

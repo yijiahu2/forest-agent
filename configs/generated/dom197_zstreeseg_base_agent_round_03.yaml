@@ -11,7 +11,7 @@ input_image: /mnt/e/Learning_documents/DEM/dom197.tif
 output_dir: /mnt/e/Learning_documents/output/dom197
 metrics_json: /home/xth/forest_agent_project/outputs/dom197_zstreeseg_base_agent_round_03/metrics.json
 details_csv: /home/xth/forest_agent_project/outputs/dom197_zstreeseg_base_agent_round_03/details.csv
-xiaoban_shp: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_xiaoban.gpkg
+xiaoban_shp: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_xiaoban.gpkg
 xiaoban_id_field: XBH
 tree_count_field: LMSL
 crown_field: PJGF
@@ -42,16 +42,16 @@ overlap: 512
 tile_overlap: 0.45
 bsize: 256
 augment: true
-iou_merge_thr: 0.24
-dem_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_dem.tif
-slope_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_slope.tif
-aspect_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_aspect.tif
-landform_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_landform.tif
-slope_position_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_slope_position.tif
-spatial_context_summary_json: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/spatial_context_summary.json
+iou_merge_thr: 0.22
+dem_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_dem.tif
+slope_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_slope.tif
+aspect_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_aspect.tif
+landform_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_landform.tif
+slope_position_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_slope_position.tif
+spatial_context_summary_json: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/spatial_context_summary.json
 spatial_context_object:
   spatial_context_enabled: true
-  spatial_context_summary_json: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/spatial_context_summary.json
+  spatial_context_summary_json: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/spatial_context_summary.json
   spatial_context_summary:
     input_image: /mnt/e/Learning_documents/DEM/dom197.tif
     dom_bounds:
@@ -68,19 +68,19 @@ spatial_context_object:
     global_aspect_tif: /mnt/e/Learning_documents/DEM/shanxia_DEM1m_aspect.tif
     global_landform_tif: /mnt/e/Learning_documents/DEM/shanxia_DEM1m_landform.tif
     global_slope_position_tif: /mnt/e/Learning_documents/DEM/shanxia_DEM1m_slope_position.tif
-    dem_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_dem.tif
-    slope_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_slope.tif
-    aspect_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_aspect.tif
-    landform_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_landform.tif
-    slope_position_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_slope_position.tif
-    xiaoban_shp: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_xiaoban.gpkg
-    xiaoban_vector: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_xiaoban.gpkg
+    dem_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_dem.tif
+    slope_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_slope.tif
+    aspect_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_aspect.tif
+    landform_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_landform.tif
+    slope_position_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_slope_position.tif
+    xiaoban_shp: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_xiaoban.gpkg
+    xiaoban_vector: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_xiaoban.gpkg
     terrain_constraint_fields:
       landform_type: landform_type
       slope_class: slope_class
       aspect_class: aspect_class
       slope_position_class: slope_position_class
-    terrain_summary_json: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/terrain_products_summary.json
+    terrain_summary_json: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/terrain_products_summary.json
     terrain_class_summary: &id001
       num_xiaoban: 3
       dominant_landform: hill_middle
@@ -92,11 +92,11 @@ spatial_context_object:
       aspect_mean_deg_mean: 189.437827450387
       relief_10km_m_mean: 34.57752990722656
   terrain_inputs:
-    dem_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_dem.tif
-    slope_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_slope.tif
-    aspect_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_aspect.tif
-    landform_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_landform.tif
-    slope_position_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context/context_slope_position.tif
+    dem_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_dem.tif
+    slope_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_slope.tif
+    aspect_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_aspect.tif
+    landform_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_landform.tif
+    slope_position_tif: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context/context_slope_position.tif
   terrain_rule_config:
     flat_slope_threshold_deg: 5.0
     plain_relief_threshold_m: 30.0
@@ -111,4 +111,4 @@ spatial_context_object:
     aspect_class: aspect_class
     slope_position_class: slope_position_class
   dominant_terrain_profile: *id001
-spatial_context_object_json: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_201710/spatial_context_object.json
+spatial_context_object_json: /home/xth/forest_agent_project/outputs/pipeline/pipeline_exp_dom197_20260317_223346/spatial_context_object.json

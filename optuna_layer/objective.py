@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from copy import deepcopy
@@ -10,13 +11,30 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.config_builder import load_yaml, save_yaml  # noqa: E402
+from optuna_layer.terrain_penalty import compute_terrain_penalties  # noqa: E402
 from tools.process_runner import run_streaming  # noqa: E402
 
 
 DEFAULT_RUNNER = "/home/xth/forest_agent_project/scripts/run_zstreeseg_experiment.py"
 DEFAULT_BASE_CONFIG = "/home/xth/forest_agent_project/configs/exp_dom194.yaml"
-DEFAULT_TRIAL_CFG_DIR = "/home/xth/forest_agent_project/configs/generated"
-DEFAULT_TRIAL_SUMMARY_DIR = "/home/xth/forest_agent_project/outputs/optuna/trials"
+def _default_output_root() -> Path:
+    return Path(os.getenv("FOREST_AGENT_OUTPUT_ROOT", "/home/xth/forest_agent_project/outputs"))
+
+
+def _default_trial_cfg_dir() -> Path:
+    return Path(
+        os.getenv("FOREST_AGENT_GENERATED_CONFIG_DIR", "/home/xth/forest_agent_project/configs/generated")
+    )
+
+
+def _default_trial_summary_dir() -> Path:
+    return Path(
+        os.getenv("FOREST_AGENT_OPTUNA_TRIAL_SUMMARY_DIR", str(_default_output_root() / "optuna" / "trials"))
+    )
+
+
+DEFAULT_TRIAL_CFG_DIR = str(_default_trial_cfg_dir())
+DEFAULT_TRIAL_SUMMARY_DIR = str(_default_trial_summary_dir())
 
 
 def ensure_parent(path: Path):
@@ -65,6 +83,22 @@ def compute_single_score(metrics: Dict[str, Any]) -> float:
     )
 
 
+def compute_single_score_with_terrain(metrics: Dict[str, Any], details_csv: str) -> tuple[float, Dict[str, Any]]:
+    base_score = compute_single_score(metrics)
+    terrain_info = compute_terrain_penalties(details_csv, metrics)
+    penalties = terrain_info["penalties"]
+    terrain_score = (
+        penalties["tree"]
+        + penalties["crown"]
+        + penalties["closure"]
+        + penalties["density"]
+    )
+    terrain_info["base_score"] = base_score
+    terrain_info["terrain_score"] = terrain_score
+    terrain_info["total_score"] = base_score + terrain_score
+    return base_score + terrain_score, terrain_info
+
+
 def build_trial_config(
     base_config_path: str,
     params: Dict[str, Any],
@@ -77,11 +111,14 @@ def build_trial_config(
     run_name = f"{base_run_name}_optuna_trial_{trial_number:04d}"
 
     cfg["run_name"] = run_name
+    cfg["keep_stage1_artifacts"] = False
     for k, v in params.items():
         cfg[k] = v
 
-    cfg["metrics_json"] = f"/home/xth/forest_agent_project/outputs/{run_name}/metrics.json"
-    cfg["details_csv"] = f"/home/xth/forest_agent_project/outputs/{run_name}/details.csv"
+    base_outputs = _default_output_root()
+    cfg["output_dir"] = str(base_outputs / run_name / "seg_output")
+    cfg["metrics_json"] = str(base_outputs / run_name / "metrics.json")
+    cfg["details_csv"] = str(base_outputs / run_name / "details.csv")
 
     cfg_path = Path(DEFAULT_TRIAL_CFG_DIR) / f"{run_name}.yaml"
     ensure_parent(cfg_path)
@@ -136,7 +173,7 @@ def objective_impl(trial, params: Dict[str, Any], base_config_path: str = DEFAUL
 
     run_info = run_trial_experiment(trial_cfg["config_path"])
     metrics = run_info["metrics"]
-    score = compute_single_score(metrics)
+    score, terrain_info = compute_single_score_with_terrain(metrics, run_info["details_csv"])
 
     # 回写 trial attrs
     trial.set_user_attr("params", params)
@@ -145,6 +182,7 @@ def objective_impl(trial, params: Dict[str, Any], base_config_path: str = DEFAUL
     trial.set_user_attr("metrics_json", run_info["metrics_json"])
     trial.set_user_attr("details_csv", run_info["details_csv"])
     trial.set_user_attr("score", score)
+    trial.set_user_attr("terrain_penalties", terrain_info.get("penalties", {}))
 
     # 单独保存 trial summary
     summary = {
@@ -153,6 +191,10 @@ def objective_impl(trial, params: Dict[str, Any], base_config_path: str = DEFAUL
         "params": params,
         "metrics": metrics,
         "score": score,
+        "terrain_penalties": terrain_info.get("penalties", {}),
+        "terrain_groups": terrain_info.get("groups", []),
+        "base_score": terrain_info.get("base_score"),
+        "terrain_score": terrain_info.get("terrain_score"),
         "metrics_json": run_info["metrics_json"],
         "details_csv": run_info["details_csv"],
         "config_path": trial_cfg["config_path"],

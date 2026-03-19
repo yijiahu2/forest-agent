@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import traceback
@@ -53,8 +54,8 @@ def save_yaml(obj: Dict[str, Any], path: str | Path):
         yaml.safe_dump(obj, f, allow_unicode=True, sort_keys=False)
 
 
-def run_subprocess(cmd, cwd: Optional[str] = None) -> Dict[str, Any]:
-    res = run_streaming(cmd, cwd=cwd)
+def run_subprocess(cmd, cwd: Optional[str] = None, env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    res = run_streaming(cmd, cwd=cwd, env=env)
 
     return {
         "cmd": cmd,
@@ -62,6 +63,465 @@ def run_subprocess(cmd, cwd: Optional[str] = None) -> Dict[str, Any]:
         "stdout": res.stdout,
         "stderr": res.stderr,
     }
+
+
+def build_pipeline_layout(pipeline_root: Path) -> Dict[str, Path]:
+    intermediate = pipeline_root / "intermediate"
+    layout = {
+        "intermediate": intermediate,
+        "baseline": intermediate / "baseline",
+        "agent": intermediate / "agent",
+        "optuna": intermediate / "optuna",
+        "local_refine": intermediate / "local_refine",
+        "finetune": intermediate / "finetune",
+    }
+    for path in layout.values():
+        ensure_dir(path)
+    return layout
+
+
+def build_stage_env(
+    *,
+    output_root: Path,
+    generated_config_dir: Optional[Path] = None,
+    agent_out: Optional[Path] = None,
+    optuna_trial_summary_dir: Optional[Path] = None,
+    local_refine_root: Optional[Path] = None,
+) -> Dict[str, str]:
+    env = os.environ.copy()
+    env["FOREST_AGENT_OUTPUT_ROOT"] = str(output_root)
+    if generated_config_dir is not None:
+        env["FOREST_AGENT_GENERATED_CONFIG_DIR"] = str(generated_config_dir)
+    if agent_out is not None:
+        env["FOREST_AGENT_AGENT_OUT"] = str(agent_out)
+    if optuna_trial_summary_dir is not None:
+        env["FOREST_AGENT_OPTUNA_TRIAL_SUMMARY_DIR"] = str(optuna_trial_summary_dir)
+    if local_refine_root is not None:
+        env["FOREST_AGENT_LOCAL_REFINE_ROOT"] = str(local_refine_root)
+    return env
+
+
+def copy_path(src: str | Path, dst: str | Path) -> Optional[str]:
+    src_path = Path(src)
+    if not src_path.exists():
+        return None
+
+    dst_path = Path(dst)
+    ensure_parent(dst_path)
+    shutil.copy2(src_path, dst_path)
+    return str(dst_path)
+
+
+def remove_path(path: str | Path) -> bool:
+    p = Path(path)
+    if not p.exists():
+        return False
+    if p.is_dir():
+        shutil.rmtree(p)
+    else:
+        p.unlink()
+    return True
+
+
+def copy_vector_dataset(src: str | Path, dst: str | Path) -> list[str]:
+    src_path = Path(src)
+    if not src_path.exists():
+        return []
+
+    copied: list[str] = []
+    for ext in [".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix"]:
+        cand = src_path.with_suffix(ext)
+        if cand.exists():
+            out = Path(dst).with_suffix(ext)
+            ensure_parent(out)
+            shutil.copy2(cand, out)
+            copied.append(str(out))
+    return copied
+
+
+def remove_vector_dataset(path: str | Path) -> None:
+    base = Path(path)
+    for ext in [".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix"]:
+        remove_path(base.with_suffix(ext))
+
+
+def get_outputs_root_from_pipeline_root(pipeline_root: Path) -> Path:
+    parent = pipeline_root.parent
+    if parent.name == "pipeline":
+        return parent.parent
+    return parent
+
+
+def get_final_root_from_pipeline_root(pipeline_root: Path) -> Path:
+    outputs_root = get_outputs_root_from_pipeline_root(pipeline_root)
+    pipeline_name = pipeline_root.name
+    if pipeline_name.startswith("pipeline_"):
+        final_name = f"final_{pipeline_name[len('pipeline_'):]}"
+    else:
+        final_name = f"final_{pipeline_name}"
+    return outputs_root / final_name
+
+
+def resolve_pipeline_artifact_path(path_str: Optional[str], pipeline_root: Path) -> Optional[Path]:
+    if not path_str:
+        return None
+    candidate = Path(path_str)
+    if candidate.exists():
+        return candidate
+
+    legacy_prefix = f"/home/xth/forest_agent_project/outputs/pipeline/{pipeline_root.name}/"
+    new_prefix = f"{str(pipeline_root)}/"
+    if path_str.startswith(legacy_prefix):
+        remapped = Path(path_str.replace(legacy_prefix, new_prefix, 1))
+        if remapped.exists():
+            return remapped
+
+    return None
+
+
+def render_vector_preview(src: str | Path, dst: str | Path) -> Optional[str]:
+    src_path = Path(src)
+    if not src_path.exists():
+        return None
+
+    try:
+        import geopandas as gpd
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+
+    gdf = gpd.read_file(src_path)
+    if gdf.empty:
+        return None
+
+    dst_path = Path(dst)
+    ensure_parent(dst_path)
+
+    fig, ax = plt.subplots(figsize=(10, 10), dpi=200)
+    gdf.boundary.plot(ax=ax, linewidth=0.3, color="#0b5d1e")
+    gdf.plot(ax=ax, linewidth=0, color="#7ccf7a", alpha=0.75)
+    ax.set_axis_off()
+    ax.set_aspect("equal")
+    fig.tight_layout(pad=0)
+    fig.savefig(dst_path, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    return str(dst_path)
+
+
+def build_semantic_union(src: str | Path, dst: str | Path) -> list[str]:
+    src_path = Path(src)
+    if not src_path.exists():
+        return []
+
+    try:
+        import geopandas as gpd
+    except Exception:
+        return []
+
+    gdf = gpd.read_file(src_path)
+    if gdf.empty:
+        return []
+
+    union_geom = gdf.geometry.union_all()
+    union_gdf = gpd.GeoDataFrame({"class": [1]}, geometry=[union_geom], crs=gdf.crs)
+    union_gdf = union_gdf.explode(index_parts=False).reset_index(drop=True)
+    union_gdf = union_gdf[~union_gdf.geometry.is_empty].copy()
+    if union_gdf.empty:
+        return []
+
+    out_path = Path(dst)
+    ensure_parent(out_path)
+    union_gdf.to_file(out_path)
+    return [str(p) for p in out_path.parent.glob(f"{out_path.stem}.*")]
+
+
+def _safe_name(name: str) -> str:
+    safe = []
+    for ch in str(name):
+        if ch.isalnum() or ch in {"-", "_"}:
+            safe.append(ch)
+        else:
+            safe.append("_")
+    return "".join(safe).strip("_") or "run"
+
+
+def resolve_final_round_summary_json(summary: Dict[str, Any]) -> Optional[str]:
+    final_artifacts = summary.get("final_artifacts", {})
+
+    finetune_summary_json = final_artifacts.get("finetune_summary_json")
+    if finetune_summary_json:
+        rerun_summary = Path(finetune_summary_json).parent / "rerun_after_finetune" / "run_experiment_summary.json"
+        if rerun_summary.exists():
+            return str(rerun_summary)
+
+    baseline_stage = summary.get("stages", {}).get("baseline", {})
+    run_summary_json = baseline_stage.get("run_summary_json")
+    if run_summary_json and Path(run_summary_json).exists():
+        return str(run_summary_json)
+
+    return None
+
+
+def score_run_summary(run_summary: Dict[str, Any]) -> Optional[float]:
+    metrics = run_summary.get("metrics") or {}
+    tree_ratio = metrics.get("tree_count_error_ratio")
+    crown_ratio = metrics.get("mean_crown_width_error_ratio")
+    closure_abs = metrics.get("closure_error_abs")
+    if tree_ratio is None or crown_ratio is None or closure_abs is None:
+        return None
+    try:
+        return float(tree_ratio) + float(crown_ratio) + float(closure_abs)
+    except Exception:
+        return None
+
+
+def resolve_best_round_summary_json(pipeline_root: Path) -> Optional[str]:
+    best_path: Optional[Path] = None
+    best_score: Optional[float] = None
+    for summary_path in sorted((pipeline_root / "intermediate").rglob("run_experiment_summary.json")):
+        try:
+            run_summary = load_json(summary_path)
+        except Exception:
+            continue
+        score = score_run_summary(run_summary)
+        if score is None:
+            continue
+        if best_score is None or score < best_score:
+            best_score = score
+            best_path = summary_path
+    return str(best_path) if best_path else None
+
+
+def build_round_selection(summary: Dict[str, Any], pipeline_root: Path) -> list[Dict[str, Any]]:
+    selected: list[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for label, summary_json in [
+        ("final", resolve_final_round_summary_json(summary)),
+        ("best", resolve_best_round_summary_json(pipeline_root)),
+    ]:
+        if not summary_json or summary_json in seen or not Path(summary_json).exists():
+            continue
+        try:
+            run_summary = load_json(summary_json)
+        except Exception:
+            continue
+        run_name = str(run_summary.get("run_name") or Path(summary_json).parent.name)
+        selected.append(
+            {
+                "label": label,
+                "run_name": run_name,
+                "summary_json": summary_json,
+                "score": score_run_summary(run_summary),
+            }
+        )
+        seen.add(summary_json)
+
+    return selected
+
+
+def enrich_summary_with_round_selection(summary: Dict[str, Any], pipeline_root: Path) -> None:
+    selected = build_round_selection(summary, pipeline_root)
+    best_summary_json = resolve_best_round_summary_json(pipeline_root)
+    summary["selected_rounds"] = selected
+    summary["final_round"] = next((item for item in selected if item["label"] == "final"), None)
+    best_round = next((item for item in selected if item["label"] == "best"), None)
+    if best_round is None and best_summary_json and summary.get("final_round"):
+        final_round = summary["final_round"]
+        if final_round.get("summary_json") == best_summary_json:
+            best_round = {
+                **final_round,
+                "label": "best",
+            }
+    summary["best_round"] = best_round
+
+
+VECTOR_DATASET_EXTS = {".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix"}
+
+
+def prune_dir_children(
+    root: Path,
+    *,
+    keep_files: Optional[set[str]] = None,
+    keep_dirs: Optional[set[str]] = None,
+    keep_vector_stems: Optional[set[str]] = None,
+) -> None:
+    if not root.exists():
+        return
+    keep_files = keep_files or set()
+    keep_dirs = keep_dirs or set()
+    keep_vector_stems = keep_vector_stems or set()
+
+    for child in root.iterdir():
+        if child.is_dir():
+            if child.name in keep_dirs:
+                continue
+            remove_path(child)
+            continue
+
+        if child.name in keep_files:
+            continue
+        if child.suffix.lower() in VECTOR_DATASET_EXTS and child.stem in keep_vector_stems:
+            continue
+        remove_path(child)
+
+
+def apply_minimal_retention(pipeline_root: Path, summary: Dict[str, Any]) -> None:
+    intermediate = pipeline_root / "intermediate"
+    if not intermediate.exists():
+        return
+
+    selected = build_round_selection(summary, pipeline_root)
+    selected_summary_paths = {
+        str(Path(item["summary_json"]).resolve())
+        for item in selected
+        if item.get("summary_json")
+    }
+
+    # baseline: keep only the evaluation anchors and the baseline instance shp.
+    baseline_root = intermediate / "baseline"
+    prune_dir_children(baseline_root, keep_dirs={"evaluation", "seg_output"})
+    prune_dir_children(
+        baseline_root / "evaluation",
+        keep_files={"metrics.json", "details.csv", "run_experiment_summary.json"},
+    )
+    prune_dir_children(
+        baseline_root / "seg_output",
+        keep_vector_stems={"Y_inst"},
+    )
+
+    # agent: only keep the final parameter summary.
+    agent_root = intermediate / "agent"
+    prune_dir_children(agent_root, keep_files={"final_summary.json"})
+
+    # optuna: only keep the best jsons needed for later reruns.
+    prune_dir_children(intermediate / "optuna" / "single", keep_files={"optuna_single_best.json"})
+    prune_dir_children(intermediate / "optuna" / "multi", keep_files={"optuna_multi_best.json"})
+
+    # local_refine: keep only the merged outputs from the latest refine run.
+    local_root = intermediate / "local_refine"
+    local_stage = summary.get("stages", {}).get("local_refine", {}) or {}
+    merged_shp = local_stage.get("merged_shp")
+    local_run_root = Path(merged_shp).parent if merged_shp else None
+    if local_run_root and local_run_root.exists():
+        prune_dir_children(local_root, keep_dirs={local_run_root.name})
+        prune_dir_children(
+            local_run_root,
+            keep_files={
+                "merged_metrics.json",
+                "merged_details.csv",
+                "local_refine_summary.json",
+                "refine_compare_summary.json",
+            },
+            keep_vector_stems={"merged_global_local_Y_inst"},
+        )
+
+    # finetune: keep the summary, best ckpt, lightweight finetuned config, and rerun outputs.
+    finetune_root = intermediate / "finetune"
+    prune_dir_children(
+        finetune_root,
+        keep_files={"finetune_pipeline_summary.json"},
+        keep_dirs={"training", "finetuned_infer", "rerun_after_finetune", "compare"},
+    )
+
+    train_summary_json = finetune_root / "training" / "train_summary.json"
+    best_ckpt_name: Optional[str] = None
+    finetune_summary_json = finetune_root / "finetune_pipeline_summary.json"
+    if finetune_summary_json.exists():
+        try:
+            finetune_summary = load_json(finetune_summary_json)
+            for step in finetune_summary.get("steps", []):
+                if step.get("step") == "train_stage1_light" and step.get("ckpt"):
+                    best_ckpt_name = Path(step["ckpt"]).name
+                    break
+        except Exception:
+            pass
+
+    training_root = finetune_root / "training"
+    if training_root.exists():
+        for child in training_root.iterdir():
+            if child.name == "train_summary.json":
+                continue
+            if child.name != "external_trainer":
+                remove_path(child)
+        external_root = training_root / "external_trainer"
+        if external_root.exists():
+            logs_root = external_root / "logs"
+            if logs_root.exists():
+                for version_dir in logs_root.iterdir():
+                    if not version_dir.is_dir():
+                        remove_path(version_dir)
+                        continue
+                    prune_dir_children(
+                        version_dir,
+                        keep_files={"hparams.yaml", "metrics.csv", "pipeline_config.yaml"},
+                        keep_dirs={"checkpoints"},
+                    )
+                    ckpt_dir = version_dir / "checkpoints"
+                    if ckpt_dir.exists():
+                        keep_files = {best_ckpt_name} if best_ckpt_name else set()
+                        prune_dir_children(ckpt_dir, keep_files=keep_files)
+
+    prune_dir_children(
+        finetune_root / "finetuned_infer",
+        keep_files={"exp_finetuned.yaml", "integration_summary.json"},
+    )
+    prune_dir_children(
+        finetune_root / "rerun_after_finetune",
+        keep_files={"metrics.json", "details.csv", "run_experiment_summary.json"},
+        keep_vector_stems={"Y_inst"},
+    )
+    prune_dir_children(
+        finetune_root / "compare",
+        keep_files={"finetune_gain_summary.json"},
+    )
+
+    # Preserve any selected non-baseline/non-finetune run summaries for future republish.
+    for summary_path in sorted(intermediate.rglob("run_experiment_summary.json")):
+        if str(summary_path.resolve()) in selected_summary_paths:
+            continue
+        baseline_summary = baseline_root / "evaluation" / "run_experiment_summary.json"
+        finetune_summary = finetune_root / "rerun_after_finetune" / "run_experiment_summary.json"
+        if summary_path == baseline_summary or summary_path == finetune_summary:
+            continue
+        remove_path(summary_path)
+
+
+def publish_pipeline_user_view(pipeline_root: Path, summary: Dict[str, Any]) -> None:
+    final_root = get_final_root_from_pipeline_root(pipeline_root)
+    if final_root.exists():
+        shutil.rmtree(final_root)
+    ensure_dir(final_root)
+    selected = build_round_selection(summary, pipeline_root)
+    for item in selected:
+        summary_path = Path(item["summary_json"])
+        try:
+            run_summary = load_json(summary_path)
+        except Exception:
+            continue
+
+        inst_shp = resolve_pipeline_artifact_path(
+            run_summary.get("merged_inst_shp") or run_summary.get("stage2", {}).get("y_inst_shp"),
+            pipeline_root,
+        )
+        if not inst_shp:
+            continue
+
+        run_name = _safe_name(run_summary.get("run_name") or summary_path.parent.name)
+        round_root = final_root / run_name
+        ensure_dir(round_root)
+
+        copy_vector_dataset(inst_shp, round_root / "merged_Y_inst.shp")
+        render_vector_preview(inst_shp, round_root / "merged_Y_inst_color.png")
+        build_semantic_union(inst_shp, round_root / "M_sem.shp")
+        render_vector_preview(round_root / "M_sem.shp", round_root / "M_sem.png")
+
+        try:
+            from reporting.experiment_report import build_experiment_report
+
+            build_experiment_report(run_summary, round_root / "report.md")
+        except Exception:
+            pass
 
 
 # =========================
@@ -360,6 +820,28 @@ def sync_spatial_context_to_config(
     return str(temp_cfg), context_obj
 
 
+def normalize_runtime_outputs_to_pipeline(
+    runtime_base_config: str,
+    pipeline_root: Path,
+) -> str:
+    cfg = load_yaml(runtime_base_config)
+    run_name = str(cfg.get("run_name", Path(pipeline_root).name))
+
+    baseline_dir = pipeline_root / "intermediate" / "baseline"
+    seg_output_dir = baseline_dir / "seg_output"
+    eval_dir = baseline_dir / "evaluation"
+
+    cfg["output_dir"] = str(seg_output_dir)
+    cfg["metrics_json"] = str(eval_dir / "metrics.json")
+    cfg["details_csv"] = str(eval_dir / "details.csv")
+    cfg["run_name"] = run_name
+    cfg["keep_stage1_artifacts"] = True
+
+    temp_cfg = pipeline_root / "runtime_base_config.yaml"
+    save_yaml(cfg, temp_cfg)
+    return str(temp_cfg)
+
+
 def resolve_runtime_base_config(
     *,
     args: argparse.Namespace,
@@ -368,20 +850,25 @@ def resolve_runtime_base_config(
     existing_runtime = pipeline_root / "runtime_base_config.yaml"
 
     if args.resume and existing_runtime.exists():
-        return str(existing_runtime)
+        runtime_base_config = str(existing_runtime)
+    else:
+        runtime_base_config = apply_cli_terrain_overrides_to_config(
+            base_config_path=args.base_config,
+            dem_tif=args.dem_tif,
+            slope_tif=args.slope_tif,
+            aspect_tif=args.aspect_tif,
+            pipeline_root=pipeline_root,
+        )
 
-    runtime_base_config = apply_cli_terrain_overrides_to_config(
-        base_config_path=args.base_config,
-        dem_tif=args.dem_tif,
-        slope_tif=args.slope_tif,
-        aspect_tif=args.aspect_tif,
-        pipeline_root=pipeline_root,
-    )
+        runtime_base_config = maybe_prepare_spatial_context_runtime_config(
+            runtime_base_config=runtime_base_config,
+            pipeline_root=pipeline_root,
+            enable_auto_spatial_context=args.auto_spatial_context,
+        )
 
-    runtime_base_config = maybe_prepare_spatial_context_runtime_config(
+    runtime_base_config = normalize_runtime_outputs_to_pipeline(
         runtime_base_config=runtime_base_config,
         pipeline_root=pipeline_root,
-        enable_auto_spatial_context=args.auto_spatial_context,
     )
 
     return runtime_base_config
@@ -437,8 +924,16 @@ def run_baseline_stage(
 
 def run_agent_stage(
     base_config_path: str,
+    stage_root: Path,
     max_rounds: int = 3,
 ) -> Dict[str, Any]:
+    generated_dir = stage_root / "generated_configs"
+    agent_out = stage_root / "final_summary.json"
+    env = build_stage_env(
+        output_root=stage_root / "runs",
+        generated_config_dir=generated_dir,
+        agent_out=agent_out,
+    )
     cmd = [
         "python",
         "-m",
@@ -447,12 +942,14 @@ def run_agent_stage(
         base_config_path,
         "--max_rounds",
         str(max_rounds),
+        "--out_json",
+        str(agent_out),
     ]
-    res = run_subprocess(cmd, cwd="/home/xth/forest_agent_project")
+    res = run_subprocess(cmd, cwd="/home/xth/forest_agent_project", env=env)
     if res["returncode"] != 0:
         raise RuntimeError(f"agent stage failed:\n{res['stderr']}")
 
-    summary_json = "/home/xth/forest_agent_project/outputs/agent/final_summary.json"
+    summary_json = str(agent_out)
     if not Path(summary_json).exists():
         raise FileNotFoundError(f"agent final_summary.json not found: {summary_json}")
 
@@ -464,14 +961,24 @@ def run_agent_stage(
 
 def run_optuna_single_stage(
     base_config_path: str,
+    stage_root: Path,
     n_trials: int = 2,
     agent_hint_json: Optional[str] = None,
     spatial_context_json: Optional[str] = None,
-    out_best_json: str = "/home/xth/forest_agent_project/outputs/optuna/optuna_single_best.json",
+    out_best_json: Optional[str] = None,
     study_name: Optional[str] = None,
     storage: Optional[str] = None,
     resume: bool = False,
 ) -> Dict[str, Any]:
+    generated_dir = stage_root / "generated_configs"
+    trial_summary_dir = stage_root / "trials"
+    out_best_json = out_best_json or str(stage_root / "optuna_single_best.json")
+    storage = storage or f"sqlite:///{stage_root / 'optuna_single.db'}"
+    env = build_stage_env(
+        output_root=stage_root / "runs",
+        generated_config_dir=generated_dir,
+        optuna_trial_summary_dir=trial_summary_dir,
+    )
     cmd = [
         "python",
         "-m",
@@ -495,7 +1002,7 @@ def run_optuna_single_stage(
     if resume:
         cmd.append("--resume")
 
-    res = run_subprocess(cmd, cwd="/home/xth/forest_agent_project")
+    res = run_subprocess(cmd, cwd="/home/xth/forest_agent_project", env=env)
     if res["returncode"] != 0:
         raise RuntimeError(f"optuna single failed:\n{res['stderr']}")
 
@@ -514,14 +1021,24 @@ def run_optuna_single_stage(
 
 def run_optuna_multi_stage(
     base_config_path: str,
+    stage_root: Path,
     n_trials: int = 2,
     agent_hint_json: Optional[str] = None,
     spatial_context_json: Optional[str] = None,
-    out_best_json: str = "/home/xth/forest_agent_project/outputs/optuna/optuna_multi_best.json",
+    out_best_json: Optional[str] = None,
     study_name: Optional[str] = None,
     storage: Optional[str] = None,
     resume: bool = False,
 ) -> Dict[str, Any]:
+    generated_dir = stage_root / "generated_configs"
+    trial_summary_dir = stage_root / "trials"
+    out_best_json = out_best_json or str(stage_root / "optuna_multi_best.json")
+    storage = storage or f"sqlite:///{stage_root / 'optuna_multi.db'}"
+    env = build_stage_env(
+        output_root=stage_root / "runs",
+        generated_config_dir=generated_dir,
+        optuna_trial_summary_dir=trial_summary_dir,
+    )
     cmd = [
         "python",
         "-m",
@@ -545,7 +1062,7 @@ def run_optuna_multi_stage(
     if resume:
         cmd.append("--resume")
 
-    res = run_subprocess(cmd, cwd="/home/xth/forest_agent_project")
+    res = run_subprocess(cmd, cwd="/home/xth/forest_agent_project", env=env)
     if res["returncode"] != 0:
         raise RuntimeError(f"optuna multi failed:\n{res['stderr']}")
 
@@ -563,6 +1080,7 @@ def run_optuna_multi_stage(
 
 def run_local_refine_stage(
     base_config_path: str,
+    stage_root: Path,
     global_details_csv: str,
     global_inst_shp: str,
     params: Dict[str, Any],
@@ -603,6 +1121,7 @@ def run_local_refine_stage(
         dem_tif=dem_tif,
         slope_tif=slope_tif,
         aspect_tif=aspect_tif,
+        local_refine_root=str(stage_root),
     )
 
     terrain_inputs = {
@@ -864,8 +1383,20 @@ def save_pipeline_summary(
     pipeline_root: Path,
     summary: Dict[str, Any],
 ):
+    enrich_summary_with_round_selection(summary, pipeline_root)
     summary_path = pipeline_root / "pipeline_summary.json"
     save_json(summary, summary_path)
+    publish_pipeline_user_view(pipeline_root, summary)
+    state_path = pipeline_root / "pipeline_state.json"
+    if state_path.exists():
+        try:
+            state = load_json(state_path)
+            if state.get("status") == "success":
+                apply_minimal_retention(pipeline_root, summary)
+                save_json(summary, summary_path)
+                publish_pipeline_user_view(pipeline_root, summary)
+        except Exception:
+            pass
     print(f"[pipeline] summary saved to: {summary_path}")
 
 
@@ -940,8 +1471,10 @@ def main():
     else:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         pipeline_name = f"pipeline_{Path(args.base_config).stem}_{stamp}"
-        pipeline_root = Path(f"/home/xth/forest_agent_project/outputs/pipeline/{pipeline_name}")
+        pipeline_root = Path(f"/home/xth/forest_agent_project/outputs/{pipeline_name}")
         ensure_dir(pipeline_root)
+
+    layout = build_pipeline_layout(pipeline_root)
 
     runtime_base_config = resolve_runtime_base_config(
         args=args,
@@ -963,6 +1496,7 @@ def main():
     summary: Dict[str, Any] = {
         "pipeline_name": pipeline_name,
         "pipeline_root": str(pipeline_root),
+        "final_root": str(get_final_root_from_pipeline_root(pipeline_root)),
         "base_config": args.base_config,
         "runtime_base_config": runtime_base_config,
         "run_flags": {
@@ -1100,6 +1634,7 @@ def main():
             force_rerun=args.force_rerun,
             fn=lambda: run_agent_stage(
                 base_config_path=runtime_base_config,
+                stage_root=layout["agent"],
                 max_rounds=args.agent_max_rounds,
             ),
         )
@@ -1138,6 +1673,7 @@ def main():
             force_rerun=args.force_rerun,
             fn=lambda: run_optuna_single_stage(
                 base_config_path=runtime_base_config,
+                stage_root=layout["optuna"] / "single",
                 n_trials=args.n_trials_single,
                 agent_hint_json=current_agent_summary_json,
                 spatial_context_json=base_cfg.get("spatial_context_object_json"),
@@ -1181,6 +1717,7 @@ def main():
             force_rerun=args.force_rerun,
             fn=lambda: run_optuna_multi_stage(
                 base_config_path=runtime_base_config,
+                stage_root=layout["optuna"] / "multi",
                 n_trials=args.n_trials_multi,
                 agent_hint_json=current_agent_summary_json,
                 spatial_context_json=base_cfg.get("spatial_context_object_json"),
@@ -1239,6 +1776,7 @@ def main():
 
             return run_local_refine_stage(
                 base_config_path=runtime_base_config,
+                stage_root=layout["local_refine"],
                 global_details_csv=current_global_details_csv,
                 global_inst_shp=current_global_inst_shp,
                 params=params,
@@ -1330,6 +1868,8 @@ def main():
                 if key in base_cfg:
                     finetune_cfg[key] = base_cfg.get(key)
 
+            finetune_cfg["output_dir"] = str(layout["finetune"])
+
             finetune_cfg["pipeline_run_dir"] = str(pipeline_root)
             finetune_cfg["spatial_context_object_json"] = base_cfg.get("spatial_context_object_json")
 
@@ -1416,6 +1956,9 @@ def main():
             "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
                 "spatial_context_object_json": base_cfg.get("spatial_context_object_json"),
         }
+        finetune_prev = stage_outputs_or_none(state, "finetune")
+        if finetune_prev:
+            summary["final_artifacts"]["finetune_summary_json"] = finetune_prev.get("finetune_summary_json")
         summary["pipeline_state_json"] = str(pipeline_root / "pipeline_state.json")
         save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
         raise
@@ -1430,6 +1973,9 @@ def main():
         "spatial_context_summary_json": base_cfg.get("spatial_context_summary_json"),
                 "spatial_context_object_json": base_cfg.get("spatial_context_object_json"),
     }
+    finetune_prev = stage_outputs_or_none(state, "finetune")
+    if finetune_prev:
+        summary["final_artifacts"]["finetune_summary_json"] = finetune_prev.get("finetune_summary_json")
     summary["pipeline_state_json"] = str(pipeline_root / "pipeline_state.json")
     save_pipeline_summary(pipeline_root=pipeline_root, summary=summary)
 

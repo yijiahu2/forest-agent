@@ -111,9 +111,16 @@ def overlay_patch_xiaoban(patch_gdf, xiaoban_gdf, id_field):
 
     inter["clip_area_m2"] = inter.geometry.area
 
-    xiaoban_area = xiaoban_gdf[[id_field, "geometry"]].copy()
-    xiaoban_area["xiaoban_area_m2"] = xiaoban_area.geometry.area
-    xiaoban_area = xiaoban_area[[id_field, "xiaoban_area_m2"]]
+    xiaoban_area = xiaoban_gdf[[id_field]].copy()
+    if "inventory_area_m2" in xiaoban_gdf.columns:
+        xiaoban_area["xiaoban_area_m2"] = pd.to_numeric(xiaoban_gdf["inventory_area_m2"], errors="coerce")
+    elif "orig_geom_area_m2" in xiaoban_gdf.columns:
+        xiaoban_area["xiaoban_area_m2"] = pd.to_numeric(xiaoban_gdf["orig_geom_area_m2"], errors="coerce")
+    else:
+        area_metric = ensure_projected_metric_crs(xiaoban_gdf[[id_field, "geometry"]].copy())
+        xiaoban_area = area_metric[[id_field, "geometry"]].copy()
+        xiaoban_area["xiaoban_area_m2"] = xiaoban_area.geometry.area
+        xiaoban_area = xiaoban_area[[id_field, "xiaoban_area_m2"]]
 
     inter = inter.merge(xiaoban_area, on=id_field, how="left")
 
@@ -123,7 +130,15 @@ def overlay_patch_xiaoban(patch_gdf, xiaoban_gdf, id_field):
     else:
         inter["overlap_ratio_in_patch"] = 0.0
 
-    inter["overlap_ratio_in_xiaoban"] = inter["clip_area_m2"] / inter["xiaoban_area_m2"].replace(0, pd.NA)
+    if "overlap_ratio_in_xiaoban" in xiaoban_gdf.columns:
+        ratio_df = xiaoban_gdf[[id_field, "overlap_ratio_in_xiaoban"]].copy()
+        ratio_df["overlap_ratio_in_xiaoban"] = pd.to_numeric(ratio_df["overlap_ratio_in_xiaoban"], errors="coerce")
+        inter = inter.merge(ratio_df, on=id_field, how="left", suffixes=("", "_preclipped"))
+        use_existing = inter["overlap_ratio_in_xiaoban"].notna()
+        computed_ratio = inter["clip_area_m2"] / inter["xiaoban_area_m2"].replace(0, pd.NA)
+        inter.loc[~use_existing, "overlap_ratio_in_xiaoban"] = computed_ratio.loc[~use_existing]
+    else:
+        inter["overlap_ratio_in_xiaoban"] = inter["clip_area_m2"] / inter["xiaoban_area_m2"].replace(0, pd.NA)
     inter["overlap_ratio_in_xiaoban"] = inter["overlap_ratio_in_xiaoban"].fillna(0.0)
 
     return inter
@@ -548,7 +563,11 @@ def compute_patch_level_metrics(
     pred_density_trees_per_ha = float(pred_tree_count / (patch_area_m2 / 10000.0)) if patch_area_m2 > 0 else 0.0
 
     expected_tree_count = None
-    if tree_count_field and tree_count_field in xiaoban_clip_gdf.columns:
+    if "est_tree_count_clip" in xiaoban_clip_gdf.columns:
+        vals = pd.to_numeric(xiaoban_clip_gdf["est_tree_count_clip"], errors="coerce").dropna()
+        if len(vals) > 0:
+            expected_tree_count = float(vals.sum())
+    elif tree_count_field and tree_count_field in xiaoban_clip_gdf.columns:
         vals = []
         for _, row in xiaoban_clip_gdf.iterrows():
             total_count = safe_float(row.get(tree_count_field))
@@ -582,7 +601,15 @@ def compute_patch_level_metrics(
     expected_density = None
 
     # 优先显式密度字段
-    if density_field and density_field in xiaoban_clip_gdf.columns:
+    if "est_density_per_ha" in xiaoban_clip_gdf.columns:
+        tmp = xiaoban_clip_gdf[["est_density_per_ha", "clip_area_m2"]].copy()
+        tmp["est_density_per_ha"] = pd.to_numeric(tmp["est_density_per_ha"], errors="coerce")
+        tmp = tmp.dropna(subset=["est_density_per_ha"])
+        if len(tmp) > 0 and tmp["clip_area_m2"].sum() > 0:
+            expected_density = float(
+                (tmp["est_density_per_ha"] * tmp["clip_area_m2"]).sum() / tmp["clip_area_m2"].sum()
+            )
+    elif density_field and density_field in xiaoban_clip_gdf.columns:
         tmp = xiaoban_clip_gdf[[density_field, "clip_area_m2"]].copy()
         tmp[density_field] = pd.to_numeric(tmp[density_field], errors="coerce")
         tmp = tmp.dropna(subset=[density_field])
@@ -700,7 +727,12 @@ def compute_xiaoban_level_details(
                 row["closure_error_abs"] = abs(pred_cover_ratio - row["expected_closure"])
 
         # 树木数量
-        if tree_count_field and tree_count_field in xb.index:
+        if "est_tree_count_clip" in xb.index:
+            exp_count = safe_float(xb["est_tree_count_clip"])
+            if exp_count is not None:
+                row["expected_tree_count"] = exp_count
+                row["tree_count_error_abs"] = abs(pred_tree_count - exp_count)
+        elif tree_count_field and tree_count_field in xb.index:
             total_count = safe_float(xb[tree_count_field])
             overlap_ratio_in_xiaoban = safe_float(xb["overlap_ratio_in_xiaoban"])
             if total_count is not None and overlap_ratio_in_xiaoban is not None:
@@ -710,7 +742,9 @@ def compute_xiaoban_level_details(
 
         # 密度：优先显式字段，否则由数量/面积推导
         exp_density = None
-        if density_field and density_field in xb.index:
+        if "est_density_per_ha" in xb.index:
+            exp_density = safe_float(xb["est_density_per_ha"])
+        elif density_field and density_field in xb.index:
             exp_density = safe_float(xb[density_field])
         elif tree_count_field and tree_count_field in xb.index and area_ha_field and area_ha_field in xb.index:
             total_count = safe_float(xb[tree_count_field])

@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -173,9 +174,14 @@ def run_tiny_backend(cfg: dict) -> Path:
 def _ensure_external_dataset(args_config: str, cfg: dict) -> Path:
     output_dir = Path(cfg["output_dir"])
     dataset_dir = output_dir / cfg.get("external_dataset_dirname", "external_stage1_dataset")
+    force_rebuild = bool(cfg.get("external_dataset_force_rebuild", False))
 
-    if dataset_dir.exists():
+    if dataset_dir.exists() and not force_rebuild:
         return dataset_dir
+
+    if dataset_dir.exists() and force_rebuild:
+        print(f"[INFO] removing existing external dataset dir: {dataset_dir}")
+        shutil.rmtree(dataset_dir)
 
     cmd = [
         sys.executable,
@@ -272,8 +278,6 @@ def run_external_backend(args_config: str, cfg: dict) -> Path:
     print(script_path.read_text(encoding="utf-8"))
 
     result = subprocess.run(["bash", str(script_path)])
-    if result.returncode != 0:
-        raise RuntimeError("train_stage1_light external backend failed")
 
     ckpt = _find_best_ckpt(trainer_output_dir)
     if ckpt is None:
@@ -281,14 +285,25 @@ def run_external_backend(args_config: str, cfg: dict) -> Path:
     if ckpt is None:
         ckpt = _find_best_ckpt(output_dir)
 
+    if result.returncode != 0 and ckpt is None:
+        raise RuntimeError("train_stage1_light external backend failed")
+
     if ckpt is None:
         raise RuntimeError("external trainer 运行结束，但未找到 ckpt 文件")
+
+    if result.returncode != 0:
+        print(
+            "[warn] external trainer exited with non-zero status, "
+            "but a checkpoint was found. Continuing with the recovered ckpt."
+        )
 
     summary = {
         "backend": "external",
         "dataset_dir": str(dataset_dir),
         "trainer_output_dir": str(trainer_output_dir),
         "script_path": str(script_path),
+        "trainer_returncode": int(result.returncode),
+        "trainer_failed_but_ckpt_recovered": bool(result.returncode != 0),
         "best_ckpt": str(ckpt),
     }
     dump_json(summary, training_dir / "train_summary.json")

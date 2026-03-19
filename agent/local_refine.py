@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -338,6 +339,55 @@ def _build_error_score(df: pd.DataFrame) -> pd.Series:
     )
 
 
+def _normalize_aspect_label(v: Any) -> Optional[str]:
+    s = safe_str(v, None)
+    if not s:
+        return None
+    s = s.strip().lower()
+    mapping = {
+        "n": "north",
+        "ne": "northeast",
+        "e": "east",
+        "se": "southeast",
+        "s": "south",
+        "sw": "southwest",
+        "w": "west",
+        "nw": "northwest",
+    }
+    return mapping.get(s, s)
+
+
+def _terrain_complexity_score_from_row(row: pd.Series) -> float:
+    terrain = detect_terrain_profile(row)
+
+    score = 1.0
+    if terrain["slope_class"] == "steep":
+        score += 0.55
+    elif terrain["slope_class"] == "moderate":
+        score += 0.20
+
+    if terrain["relief_class"] == "high_relief":
+        score += 0.30
+    elif terrain["relief_class"] == "mid_relief":
+        score += 0.10
+
+    landform = safe_str(terrain.get("landform_type"), "").lower()
+    if landform in {"mountain_middle", "mountain_low", "hill_high"}:
+        score += 0.30
+    elif landform in {"hill_middle"}:
+        score += 0.15
+
+    slope_position = safe_str(terrain.get("slope_position_class"), "").lower()
+    if slope_position in {"ridge", "valley"}:
+        score += 0.25
+
+    aspect = _normalize_aspect_label(terrain.get("aspect_class"))
+    if aspect in {"north", "northeast", "northwest"}:
+        score += 0.10
+
+    return score
+
+
 def select_bad_xiaoban_rows(
     details_csv: str,
     tree_count_err_thr: float = 80.0,
@@ -361,22 +411,33 @@ def select_bad_xiaoban_rows(
             raise ValueError(f"details.csv missing required column: {col}")
 
     df["xiaoban_id"] = df["xiaoban_id"].astype(str)
+    df["terrain_complexity_score"] = df.apply(_terrain_complexity_score_from_row, axis=1)
 
     cond = (
         (df["tree_count_error_abs"].fillna(0) >= tree_count_err_thr)
         | (df["mean_crown_width_error_abs"].fillna(0) >= crown_err_thr)
         | (df["closure_error_abs"].fillna(0) >= closure_err_thr)
     )
+    complex_cond = (
+        (df["terrain_complexity_score"] >= 1.7)
+        & (
+            (df["tree_count_error_abs"].fillna(0) >= tree_count_err_thr * 0.65)
+            | (df["mean_crown_width_error_abs"].fillna(0) >= crown_err_thr * 0.75)
+            | (df["closure_error_abs"].fillna(0) >= closure_err_thr * 0.75)
+        )
+    )
 
-    bad = df[cond].copy()
+    bad = df[cond | complex_cond].copy()
 
     if bad.empty:
         tmp = df.copy()
         tmp["error_score"] = _build_error_score(tmp)
-        bad = tmp.sort_values("error_score", ascending=False).head(top_k)
+        tmp["priority_score"] = tmp["error_score"] * tmp["terrain_complexity_score"]
+        bad = tmp.sort_values("priority_score", ascending=False).head(top_k)
     else:
         bad["error_score"] = _build_error_score(bad)
-        bad = bad.sort_values("error_score", ascending=False).head(top_k)
+        bad["priority_score"] = bad["error_score"] * bad["terrain_complexity_score"]
+        bad = bad.sort_values("priority_score", ascending=False).head(top_k)
 
     return bad.reset_index(drop=True)
 
@@ -440,6 +501,7 @@ def build_local_refine_config(
     cfg["xiaoban_shp"] = local_xiaoban_shp
     cfg["_grouped_dispatch_active"] = True
     cfg["disable_mlflow"] = True
+    cfg["keep_stage1_artifacts"] = False
 
     if local_dem_tif:
         cfg["dem_tif"] = local_dem_tif
@@ -764,6 +826,68 @@ def detect_terrain_profile(row: pd.Series) -> Dict[str, Any]:
     }
 
 
+def apply_terrain_adjustments(
+    *,
+    params: Dict[str, Any],
+    dominant_error: str,
+    count_direction: str,
+    cover_direction: str,
+    terrain_profile: Dict[str, Any],
+) -> Tuple[Dict[str, Any], List[str]]:
+    params = dict(params)
+    notes: List[str] = []
+
+    slope_class = terrain_profile.get("slope_class")
+    relief_class = terrain_profile.get("relief_class")
+    landform_type = safe_str(terrain_profile.get("landform_type"), "").lower()
+    slope_position = safe_str(terrain_profile.get("slope_position_class"), "").lower()
+    aspect_class = _normalize_aspect_label(terrain_profile.get("aspect_class"))
+
+    is_complex_landform = landform_type in {"mountain_middle", "mountain_low", "hill_high", "hill_middle"}
+    is_ridge_valley = slope_position in {"ridge", "valley"}
+    is_shaded = aspect_class in {"north", "northeast", "northwest"}
+    is_steep_complex = slope_class == "steep" or relief_class == "high_relief" or is_complex_landform
+
+    if is_steep_complex:
+        params["overlap"] = 512
+        params["tile_overlap"] = max(float(params.get("tile_overlap", 0.35)), 0.45)
+        notes.append("steep_or_high_relief_overlap_boost")
+
+    if is_ridge_valley:
+        params["tile"] = 1536
+        params["tile_overlap"] = max(float(params.get("tile_overlap", 0.35)), 0.45)
+        notes.append("ridge_valley_smaller_tile")
+
+    if is_shaded and dominant_error in {"count", "closure", "crown"}:
+        params["augment"] = True
+        params["tile_overlap"] = max(float(params.get("tile_overlap", 0.35)), 0.45)
+        notes.append("shaded_slope_recall_boost")
+
+    if dominant_error in {"count", "density"} and count_direction == "under":
+        if is_ridge_valley or is_shaded:
+            params["diam_list"] = "96,160,256"
+            params["tile"] = 1536
+            params["iou_merge_thr"] = min(float(params.get("iou_merge_thr", 0.28)), 0.24)
+            notes.append("terrain_underseg_small_crown_boost")
+
+    if dominant_error == "closure" and cover_direction == "low":
+        if is_complex_landform or is_ridge_valley:
+            params["augment"] = True
+            params["tile"] = 1536
+            params["tile_overlap"] = max(float(params.get("tile_overlap", 0.35)), 0.45)
+            notes.append("terrain_low_closure_recovery")
+
+    if dominant_error in {"count", "density"} and count_direction == "over":
+        if is_steep_complex:
+            params["diam_list"] = "128,256,320"
+            params["tile"] = 2048
+            params["iou_merge_thr"] = max(float(params.get("iou_merge_thr", 0.24)), 0.28)
+            params["augment"] = False
+            notes.append("steep_overseg_merge_bias")
+
+    return sanitize_params(params), notes
+
+
 def choose_local_params_for_one_xiaoban(
     row: pd.Series,
     base_params: Dict[str, Any],
@@ -935,11 +1059,19 @@ def choose_local_params_for_one_xiaoban(
     if landform_type in {"mountain_middle", "mountain_low", "hill_high"}:
         params["iou_merge_thr"] = max(float(params["iou_merge_thr"]), 0.24)
 
-    params = sanitize_params(params)
+    params, terrain_adjustments = apply_terrain_adjustments(
+        params=params,
+        dominant_error=dominant,
+        count_direction=count_direction,
+        cover_direction=cover_direction,
+        terrain_profile=terrain_profile,
+    )
 
     profile = {
         "error_profile": err_profile,
         "terrain_profile": terrain_profile,
+        "terrain_complexity_score": _terrain_complexity_score_from_row(row),
+        "terrain_adjustments": terrain_adjustments,
     }
     return strategy, params, profile
 
@@ -1137,6 +1269,7 @@ def run_local_refinement(
     dem_tif: Optional[str] = None,
     slope_tif: Optional[str] = None,
     aspect_tif: Optional[str] = None,
+    local_refine_root: Optional[str] = None,
 ):
     base_cfg = load_yaml(base_config_path)
     base_params = sanitize_params(best_params)
@@ -1160,7 +1293,11 @@ def run_local_refinement(
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     refine_name = "local_refine_" + "_".join([str(x) for x in bad_ids]) + f"_{stamp}"
-    local_root = Path(f"/home/xth/forest_agent_project/outputs/local_refine/{refine_name}")
+    root_dir = local_refine_root or os.getenv(
+        "FOREST_AGENT_LOCAL_REFINE_ROOT",
+        "/home/xth/forest_agent_project/outputs/local_refine",
+    )
+    local_root = Path(root_dir) / refine_name
     ensure_dir(local_root)
 
     terrain_info = prepare_terrain_rasters(

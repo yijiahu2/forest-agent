@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,81 @@ from tools.process_runner import run_streaming  # noqa: E402
 def load_json(path: str | Path) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def remove_path(path: str | Path) -> bool:
+    p = Path(path)
+    if not p.exists():
+        return False
+    if p.is_dir():
+        shutil.rmtree(p)
+    else:
+        p.unlink()
+    return True
+
+
+def remove_vector_dataset(path: str | Path) -> list[str]:
+    p = Path(path)
+    removed: list[str] = []
+    for ext in [".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix"]:
+        cand = p.with_suffix(ext)
+        if cand.exists():
+            cand.unlink()
+            removed.append(str(cand))
+    return removed
+
+
+def slim_group_summary(group_summary: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "group_id": group_summary.get("group_id"),
+        "strategy_label": group_summary.get("strategy_label"),
+        "planner_source": group_summary.get("planner_source"),
+        "group_name": group_summary.get("group_name"),
+        "xiaoban_ids": group_summary.get("xiaoban_ids"),
+        "params": group_summary.get("params"),
+        "terrain_summary": group_summary.get("terrain_summary"),
+    }
+
+
+def cleanup_group_artifacts(group_summaries: List[Dict[str, Any]], keep_debug_outputs: bool) -> Dict[str, Any]:
+    removed: Dict[str, Any] = {"removed_files": [], "removed_vector_datasets": []}
+    if keep_debug_outputs:
+        return removed
+
+    for group_summary in group_summaries:
+        for key in [
+            "roi_image",
+            "roi_dem_tif",
+            "roi_slope_tif",
+            "roi_aspect_tif",
+            "roi_landform_tif",
+            "roi_slope_position_tif",
+            "m_sem_tif",
+            "y_inst_tif",
+            "y_inst_color_png",
+        ]:
+            path = group_summary.get(key)
+            if path and remove_path(path):
+                removed["removed_files"].append(path)
+
+        for key in ["roi_xiaoban_shp", "group_inst_shp", "filtered_group_inst_shp"]:
+            path = group_summary.get(key)
+            if path:
+                removed_vec = remove_vector_dataset(path)
+                if removed_vec:
+                    removed["removed_vector_datasets"].append({"label": key, "paths": removed_vec})
+
+        group_output_dir = group_summary.get("group_output_dir")
+        if group_output_dir and remove_path(group_output_dir):
+            removed["removed_files"].append(group_output_dir)
+
+        if group_output_dir:
+            group_dir = Path(group_output_dir).parent
+            if group_dir.exists():
+                shutil.rmtree(group_dir, ignore_errors=True)
+                removed["removed_files"].append(str(group_dir))
+
+    return removed
 
 
 def _group_root_from_cfg(cfg: Dict[str, Any]) -> Path:
@@ -353,30 +429,43 @@ def run_grouped_experiment(config_path: str) -> Dict[str, Any]:
     merged_shp = str(output_dir / "Y_inst.shp")
     _merge_group_outputs(merged_inputs, merged_shp)
     eval_info = _run_final_evaluation(cfg, merged_shp, terrain_info)
+    cleanup_info = cleanup_group_artifacts(
+        group_summaries=group_summaries,
+        keep_debug_outputs=bool(cfg.get("keep_debug_outputs", False)),
+    )
+    if not cfg.get("keep_debug_outputs", False):
+        remove_path(plan_json)
+    slim_groups = [slim_group_summary(gs) for gs in group_summaries]
 
     summary = {
         "mode": "grouped_inference",
         "run_name": cfg.get("run_name"),
         "config_path": config_path,
-        "group_root": str(group_root),
-        "group_plan_json": str(plan_json),
-        "group_count": len(group_summaries),
-        "group_summaries": group_summaries,
+        "group_root": str(group_root) if cfg.get("keep_debug_outputs", False) else None,
+        "group_plan_json": str(plan_json) if cfg.get("keep_debug_outputs", False) else None,
+        "group_count": len(slim_groups),
+        "group_summaries": slim_groups,
         "merged_inst_shp": merged_shp,
         "metrics_json": eval_info["metrics_json"],
         "details_csv": eval_info["details_csv"],
         "metrics": eval_info["metrics"],
         "terrain_info": terrain_info,
+        "cleanup": cleanup_info,
     }
     summary_json = str(Path(cfg["metrics_json"]).resolve().parent / "run_experiment_summary.json")
     summary["summary_json"] = summary_json
     save_json(summary, summary_json)
     report_md = str(Path(cfg["metrics_json"]).resolve().parent / "run_experiment_report.md")
     report_path = build_experiment_report(summary, report_md)
-    summary["report_md"] = report_path
+    if cfg.get("keep_debug_outputs", False):
+        summary["report_md"] = report_path
+    else:
+        remove_path(report_path)
+        summary["report_md"] = None
     save_json(summary, summary_json)
     print(f"[grouped_runner] summary saved to: {summary_json}")
-    print(f"[grouped_runner] report saved to: {report_path}")
+    if cfg.get("keep_debug_outputs", False):
+        print(f"[grouped_runner] report saved to: {report_path}")
     return summary
 
 

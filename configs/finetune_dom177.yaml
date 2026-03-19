@@ -1,7 +1,7 @@
 experiment_name: forest_agent_finetune
-run_name: dom197_stage1_tcd_external_finetune
+run_name: dom177_stage1_tcd_external_finetune
 
-base_config: /home/xth/forest_agent_project/configs/exp_dom197.yaml
+base_config: /home/xth/forest_agent_project/configs/exp_dom177.yaml
 
 # 这些字段在完整 pipeline 中会由运行时配置补写。
 # 如果单独执行 finetune pipeline，需要显式提供这些路径。
@@ -10,7 +10,7 @@ metrics_json:
 details_csv:
 pseudo_inst_shp:
 
-input_image: /mnt/e/Learning_documents/DEM/dom197.tif
+input_image: /mnt/e/Learning_documents/DEM/dom177.tif
 xiaoban_shp: /mnt/e/Learning_documents/output/shp/xiaoban29pro.shp
 xiaoban_id_field: "XBH"
 
@@ -25,7 +25,7 @@ aspect_tif:
 
 pseudo_mask_tif:
 
-output_dir: /home/xth/forest_agent_project/outputs/finetune/dom197
+output_dir: /home/xth/forest_agent_project/outputs/finetune/dom177
 
 pseudo_strategy: conservative
 max_pseudo_rois: 80

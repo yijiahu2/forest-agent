@@ -78,6 +78,7 @@ def main() -> None:
         raise RuntimeError(f"训练完成后未找到 train_summary.json: {train_summary_path}")
 
     train_summary = load_json_file(train_summary_path)
+    summary["train_summary_json"] = str(train_summary_path)
 
     ckpt = train_summary.get("best_ckpt")
     if not ckpt:
@@ -86,6 +87,7 @@ def main() -> None:
     if not Path(ckpt).exists():
         raise RuntimeError(f"best_ckpt 文件不存在: {ckpt}")
 
+    summary["best_ckpt"] = ckpt
     summary["steps"].append(
         {
             "step": "train_stage1_light",
@@ -180,10 +182,12 @@ def main() -> None:
                     args.config,
                 ]
             )
+            summary["compare_json"] = str(compare_dir / "finetune_gain_summary.json")
             summary["steps"].append(
                 {
                     "step": "compare",
                     "compare_dir": str(compare_dir),
+                    "compare_json": str(compare_dir / "finetune_gain_summary.json"),
                     "before_csv": before_csv,
                     "after_csv": after_csv,
                 }

@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import subprocess
 import sys
 from copy import deepcopy
@@ -18,8 +19,20 @@ from tools.process_runner import run_streaming  # noqa: E402
 # 基础工具
 # =========================
 
-DEFAULT_AGENT_OUT = "/home/xth/forest_agent_project/outputs/agent/final_summary.json"
-DEFAULT_GENERATED_DIR = "/home/xth/forest_agent_project/configs/generated"
+def _default_output_root() -> Path:
+    return Path(os.getenv("FOREST_AGENT_OUTPUT_ROOT", "/home/xth/forest_agent_project/outputs"))
+
+
+def _default_generated_dir() -> Path:
+    return Path(
+        os.getenv("FOREST_AGENT_GENERATED_CONFIG_DIR", "/home/xth/forest_agent_project/configs/generated")
+    )
+
+
+DEFAULT_AGENT_OUT = str(
+    Path(os.getenv("FOREST_AGENT_AGENT_OUT", str(_default_output_root() / "agent" / "final_summary.json")))
+)
+DEFAULT_GENERATED_DIR = str(_default_generated_dir())
 DEFAULT_RUNNER = "/home/xth/forest_agent_project/scripts/run_zstreeseg_experiment.py"
 
 SAFE_SEARCH_SPACE = {
@@ -176,11 +189,14 @@ def build_trial_config(
     run_name = f"{base_run_name}_agent_round_{round_idx:02d}"
 
     cfg["run_name"] = run_name
+    cfg["keep_stage1_artifacts"] = False
     for k, v in params.items():
         cfg[k] = v
 
-    cfg["metrics_json"] = f"/home/xth/forest_agent_project/outputs/{run_name}/metrics.json"
-    cfg["details_csv"] = f"/home/xth/forest_agent_project/outputs/{run_name}/details.csv"
+    base_outputs = _default_output_root()
+    cfg["output_dir"] = str(base_outputs / run_name / "seg_output")
+    cfg["metrics_json"] = str(base_outputs / run_name / "metrics.json")
+    cfg["details_csv"] = str(base_outputs / run_name / "details.csv")
 
     out_path = Path(out_dir) / f"{run_name}.yaml"
     ensure_parent(out_path)
@@ -341,6 +357,69 @@ def normalize_agent_response(resp: Dict[str, Any]) -> Dict[str, Any]:
     return {"params": params, "reason": reason}
 
 
+def heuristic_agent_response(
+    current_params: Dict[str, Any],
+    latest_metrics: Dict[str, Any],
+    round_idx: int,
+) -> Dict[str, Any]:
+    params = sanitize_params(deepcopy(current_params))
+
+    tree_err = float(latest_metrics.get("tree_count_error_ratio", 0.0) or 0.0)
+    crown_err = float(latest_metrics.get("mean_crown_width_error_ratio", 0.0) or 0.0)
+    closure_err = float(latest_metrics.get("closure_error_abs", 0.0) or 0.0)
+
+    # Round 1 gives a broader receptive field. Later rounds react to observed errors.
+    if round_idx == 1 and not latest_metrics:
+        params.update({
+            "diam_list": "128,192,320",
+            "tile": 1536,
+            "overlap": 384,
+            "tile_overlap": 0.45,
+            "augment": True,
+            "iou_merge_thr": 0.24,
+            "bsize": 256,
+        })
+        return {
+            "params": sanitize_params(params),
+            "reason": "LLM unavailable, fallback to heuristic round-1 exploration.",
+        }
+
+    if tree_err > 1.5:
+        params.update({
+            "diam_list": "128,256,320",
+            "tile": 2048,
+            "overlap": 512,
+            "tile_overlap": 0.45,
+            "augment": True,
+            "iou_merge_thr": 0.22 if round_idx >= 3 else 0.28,
+            "bsize": 256,
+        })
+        return {
+            "params": sanitize_params(params),
+            "reason": "LLM unavailable, fallback to over-segmentation heuristic.",
+        }
+
+    if crown_err > 0.35 or closure_err > 0.12:
+        params.update({
+            "diam_list": "128,256,320",
+            "tile": 2048,
+            "overlap": 512,
+            "tile_overlap": 0.45,
+            "augment": True,
+            "iou_merge_thr": 0.24,
+            "bsize": 256,
+        })
+        return {
+            "params": sanitize_params(params),
+            "reason": "LLM unavailable, fallback to crown/closure heuristic.",
+        }
+
+    return {
+        "params": sanitize_params(params),
+        "reason": "LLM unavailable, fallback to current safe params.",
+    }
+
+
 def save_agent_final_summary(
     final_params: dict,
     final_summary: str,
@@ -400,8 +479,16 @@ def run_agent_loop(
             spatial_context=spatial_context,
         )
 
-        raw_resp = try_call_doubao_json(prompt)
-        norm = normalize_agent_response(raw_resp)
+        try:
+            raw_resp = try_call_doubao_json(prompt)
+            norm = normalize_agent_response(raw_resp)
+        except Exception as e:
+            print(f"[agent.graph] LLM unavailable, fallback to heuristic params: {e}")
+            norm = heuristic_agent_response(
+                current_params=current_params,
+                latest_metrics=best_metrics or {},
+                round_idx=round_idx,
+            )
         proposed_params = norm["params"]
         reason = norm["reason"]
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import shlex
 import subprocess
 import sys
@@ -29,6 +30,28 @@ def save_json(obj: Dict[str, Any], path: str | Path):
     ensure_parent(path)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)
+
+
+def remove_path(path: str | Path) -> bool:
+    p = Path(path)
+    if not p.exists():
+        return False
+    if p.is_dir():
+        shutil.rmtree(p)
+    else:
+        p.unlink()
+    return True
+
+
+def remove_vector_dataset(path: str | Path) -> list[str]:
+    p = Path(path)
+    removed: list[str] = []
+    for ext in [".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix"]:
+        cand = p.with_suffix(ext)
+        if cand.exists():
+            cand.unlink()
+            removed.append(str(cand))
+    return removed
 
 
 def load_json(path: str | Path) -> Dict[str, Any]:
@@ -180,6 +203,44 @@ def collect_run_metadata(cfg: Dict[str, Any], terrain_info: Dict[str, Any]) -> D
         "terrain_slope_position_field": cfg.get("terrain_slope_position_field", "slope_position_class"),
     }
     return meta
+
+
+def cleanup_unused_outputs(
+    cfg: Dict[str, Any],
+    stage1_info: Dict[str, Any],
+    stage2_info: Dict[str, Any],
+    report_path: Optional[str],
+) -> Dict[str, Any]:
+    removed: Dict[str, Any] = {
+        "removed_files": [],
+        "removed_vector_datasets": [],
+    }
+
+    if cfg.get("keep_debug_outputs", False):
+        return removed
+
+    if not cfg.get("keep_stage1_artifacts", False):
+        for key in ["m_sem_tif", "m_sem_png"]:
+            path = stage1_info.get(key)
+            if path and remove_path(path):
+                removed["removed_files"].append(path)
+                stage1_info[key] = None
+
+        m_sem_shp = Path(cfg["output_dir"]) / "M_sem.shp"
+        removed_vec = remove_vector_dataset(m_sem_shp)
+        if removed_vec:
+            removed["removed_vector_datasets"].append({"label": "M_sem", "paths": removed_vec})
+
+    for key in ["y_inst_tif", "y_inst_color_png"]:
+        path = stage2_info.get(key)
+        if path and remove_path(path):
+            removed["removed_files"].append(path)
+            stage2_info[key] = None
+
+    if report_path and remove_path(report_path):
+        removed["removed_files"].append(report_path)
+
+    return removed
 
 
 def _normalize_extra_args(extra_args: Any) -> list[str]:
@@ -506,11 +567,14 @@ def run_experiment(config_path: str) -> Dict[str, Any]:
     summary["details_csv"] = eval_info["details_csv"]
     summary["run_name"] = cfg.get("run_name")
     report_path = build_experiment_report(summary, report_md)
-    summary["report_md"] = report_path
+    cleanup_info = cleanup_unused_outputs(cfg, stage1_info, stage2_info, report_path)
+    summary["report_md"] = report_path if cfg.get("keep_debug_outputs", False) else None
+    summary["cleanup"] = cleanup_info
     save_json(summary, summary_json)
 
     print(f"[runner] summary saved to: {summary_json}")
-    print(f"[runner] report saved to: {report_path}")
+    if cfg.get("keep_debug_outputs", False):
+        print(f"[runner] report saved to: {report_path}")
     return summary
 
 
